@@ -128,7 +128,7 @@ git tag v1.0.1 && git push origin v1.0.1
 | 路径 | 内容 |
 |---|---|
 | `crates/core` | 识别引擎：豆包（protobuf + WebSocket）、微信（secp128r1 ECDH、AES-256-ECB、snappy）、千问（HMAC-SHA1、AES-128-CBC）；音频采集与重采样、Opus 编码 |
-| `crates/platform` | 平台层：全局快捷键（CGEventTap / WH_KEYBOARD_LL）、上屏、光标位置、权限 |
+| `crates/platform` | 平台层：全局快捷键（CGEventTap / WH_KEYBOARD_LL / evdev）、上屏、光标位置、权限。Linux 的机制与限制见 [`docs/linux.md`](docs/linux.md) |
 | `crates/hanbao` | 离线引擎：编译 `Sources/CHanbao`，在 macOS 进程内加载安卓 ELF 引擎库 |
 | `crates/wtlocal` | 微信离线引擎：解析官方 xnet 模型，FBank 特征、int8 矩阵乘（NEON / AVX2）、40 层 Transformer 推理与流式解码 |
 | `app/src-tauri` | Tauri 应用：设置、快捷键状态机、会话调度、浮层窗口、托盘、离线资源下载 |

@@ -481,7 +481,8 @@ impl Ctl {
         self.auto_stop = auto_stop;
         self.gen += 1;
         self.mode = Mode::Single(s.channel);
-        self.typer = s.streaming.then(Typer::default);
+        // Linux：uinput 无法逐字打进中文，关闭流式上屏，改为结束时一次性粘贴
+        self.typer = (s.streaming && !cfg!(target_os = "linux")).then(Typer::default);
         self.segs = Segments::default();
         let seg = self.segs.start();
         ui::hud(&self.app, "listen", "", s.channel);

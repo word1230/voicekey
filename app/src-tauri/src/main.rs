@@ -111,7 +111,13 @@ fn get_state(app: AppHandle) -> serde_json::Value {
     let hold: Vec<_> = pf::hold_keys().iter().map(|k| json!({ "id": k.id, "name": k.name })).collect();
     json!({
         "settings": s,
-        "platform": if cfg!(target_os = "macos") { "mac" } else { "win" },
+        "platform": if cfg!(target_os = "macos") {
+            "mac"
+        } else if cfg!(target_os = "linux") {
+            "linux"
+        } else {
+            "win"
+        },
         "arch": std::env::consts::ARCH,
         "version": app.package_info().version.to_string(),
         "holdKeys": hold,
@@ -203,7 +209,13 @@ fn meter(app: AppHandle, on: bool) {
 
 #[tauri::command]
 fn open_url(url: String) {
-    let cmd = if cfg!(target_os = "macos") { "open" } else { "explorer" };
+    let cmd = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "linux") {
+        "xdg-open"
+    } else {
+        "explorer"
+    };
     let _ = std::process::Command::new(cmd).arg(url).spawn();
 }
 
@@ -272,10 +284,14 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("failed to build app")
-        .run(|app, e| match e {
-            #[cfg(target_os = "macos")]
-            RunEvent::Reopen { .. } => ui::show_settings(app),
-            RunEvent::ExitRequested { api, code: None, .. } => api.prevent_exit(),
-            _ => {}
+        .run(|app, e| {
+            // Linux/Windows 下 Reopen 分支被 cfg 掉，避免 app 未使用告警
+            let _ = &app;
+            match e {
+                #[cfg(target_os = "macos")]
+                RunEvent::Reopen { .. } => ui::show_settings(app),
+                RunEvent::ExitRequested { api, code: None, .. } => api.prevent_exit(),
+                _ => {}
+            }
         });
 }

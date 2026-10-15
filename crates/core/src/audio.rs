@@ -181,7 +181,9 @@ pub fn watch_microphones(on_change: impl Fn(Vec<String>) + Send + 'static) {
                 on_change(current.0.clone());
                 previous = Some(current);
             }
-            std::thread::sleep(std::time::Duration::from_secs(2));
+            // Linux/Windows 无设备变更通知，只能轮询；ALSA 枚举会打印 OSS 探测告警，
+            // 拉长周期以减少噪音
+            std::thread::sleep(std::time::Duration::from_secs(5));
         }
     });
 }

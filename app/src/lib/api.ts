@@ -17,7 +17,7 @@ export interface OfflineStatus { state: "missing" | "downloading" | "ready" | "f
 export interface Perms { accessibility: boolean; mic: "granted" | "denied" | "undetermined" }
 export interface UpdateStatus { state: "idle" | "checking" | "latest" | "available" | "downloading" | "error"; version?: string; progress?: number; error?: string }
 export interface AppInfo {
-  settings: Settings; platform: "mac" | "win"; arch: string; version: string;
+  settings: Settings; platform: "mac" | "win" | "linux"; arch: string; version: string;
   holdKeys: { id: string; name: string }[]; channels: Channel[];
   offline: { supported: boolean }; models: Partial<Record<Channel, OfflineStatus>>; perms: Perms; update: UpdateStatus;
 }
@@ -47,7 +47,8 @@ export const LOCAL: Partial<Record<Channel, string>> = { offline: "约 190MB", w
 export function applyLook(platform: string, theme: string) {
   const root = document.documentElement;
   root.classList.toggle("mac", platform === "mac");
-  root.classList.toggle("win", platform === "win");
+  // Linux 复用 Windows 的桌面观感（圆角/字体/开关样式）
+  root.classList.toggle("win", platform !== "mac");
   const dark = theme === "dark" || (theme === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
   root.classList.toggle("dark", dark);
 }

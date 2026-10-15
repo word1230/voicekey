@@ -4,6 +4,10 @@
 mod mac;
 #[cfg(target_os = "macos")]
 use mac as imp;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as imp;
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]

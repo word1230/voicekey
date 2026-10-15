@@ -37,7 +37,7 @@
 <h3>关于</h3>
 <div class="group">
   <div class="row">
-    <div class="lbl">VoiceKey {info.version}<small>{info.platform === "mac" ? "macOS" : "Windows"} · {info.arch}
+    <div class="lbl">VoiceKey {info.version}<small>{info.platform === "mac" ? "macOS" : info.platform === "linux" ? "Linux" : "Windows"} · {info.arch}
       {#if u.state === "available"} · 新版本 v{u.version} 可用{:else if u.state === "latest"} · 已是最新版本{:else if u.state === "error"} · 更新失败：{u.error}{/if}</small></div>
     {#if u.state === "available"}
       <button class="btn pri" onclick={() => call("update_install")}>更新并重启</button>
