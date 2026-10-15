@@ -135,6 +135,8 @@ pub struct Ctl {
     auto_stop: bool,
     heard_voice: bool,
     last_voice: Instant,
+    /// 本次录音起点，用于让松手后的识别超时随录音时长伸缩
+    record_started: Instant,
     typer: Option<Typer>,
     segs: Segments,
     rows: Vec<Row>,
@@ -193,6 +195,7 @@ pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) 
         auto_stop: false,
         heard_voice: false,
         last_voice: Instant::now(),
+        record_started: Instant::now(),
         typer: None,
         segs: Segments::default(),
         rows: Vec::new(),
@@ -365,6 +368,7 @@ impl Ctl {
                 self.recording = true;
                 self.heard_voice = false;
                 self.last_voice = Instant::now();
+                self.record_started = Instant::now();
                 ui::set_tray_active(&self.app, true);
                 Some(audio)
             }
@@ -440,6 +444,7 @@ impl Ctl {
         self.recording = true;
         self.heard_voice = false;
         self.last_voice = Instant::now();
+        self.record_started = Instant::now();
         ui::set_tray_active(&self.app, true);
         Some(rx)
     }
@@ -726,9 +731,11 @@ impl Ctl {
             Mode::Idle => return,
         }
         self.timeout_token += 1;
+        // 引擎欠账随说话时长线性增长（6 包批次约 RTT/D ≈ 0.6），超时随录音时长伸缩
+        let wait = Duration::from_secs_f64(15.0 + self.record_started.elapsed().as_secs_f64() * 0.6);
         let (token, tx) = (self.timeout_token, self.tx.clone());
         tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(15)).await;
+            tokio::time::sleep(wait).await;
             let _ = tx.send(Msg::Timeout { token });
         });
     }

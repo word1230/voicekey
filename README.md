@@ -127,7 +127,7 @@ git tag v1.0.1 && git push origin v1.0.1
 
 | 路径 | 内容 |
 |---|---|
-| `crates/core` | 识别引擎：豆包（protobuf + WebSocket）、微信（secp128r1 ECDH、AES-256-ECB、snappy）、千问（HMAC-SHA1、AES-128-CBC）；音频采集与重采样、Opus 编码 |
+| `crates/core` | 识别引擎：豆包（protobuf + WebSocket）、微信（secp128r1 ECDH、AES-256-ECB、snappy）、千问（HMAC-SHA1、AES-128-CBC）；音频采集与重采样、Opus 编码。微信渠道的停等延迟、20 秒可用上限与修法见 [`docs/wetype-latency.md`](docs/wetype-latency.md) |
 | `crates/platform` | 平台层：全局快捷键（CGEventTap / WH_KEYBOARD_LL / evdev）、上屏、光标位置、权限。Linux 的机制与限制见 [`docs/linux.md`](docs/linux.md) |
 | `crates/hanbao` | 离线引擎：编译 `Sources/CHanbao`，在 macOS 进程内加载安卓 ELF 引擎库 |
 | `crates/wtlocal` | 微信离线引擎：解析官方 xnet 模型，FBank 特征、int8 矩阵乘（NEON / AVX2）、40 层 Transformer 推理与流式解码 |

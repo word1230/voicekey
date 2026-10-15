@@ -1,14 +1,16 @@
 use crate::pb::{self, PBuf};
 use crate::util::{data_file, now_ms, rand_lower};
-use crate::ws::{self, Ws};
+use crate::ws::{self, AbortOnDrop, Ws};
 use crate::{opus, Audio, Engine, Partial};
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyInit};
 use anyhow::{anyhow, bail, Result};
-use futures_util::SinkExt;
+use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::{SinkExt, StreamExt};
 use md5::Md5;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
@@ -101,8 +103,20 @@ impl Engine for WeTypeEngine {
     }
 
     async fn run(&self, audio: Audio, partial: Partial) -> Result<String> {
-        let mut audio = crate::audio::lead(audio);
+        let audio = crate::audio::lead(audio);
         let (c, reused) = self.take().await?;
+        // 原型 A：默认流水线；WETYPE_STOPWAIT=1 退回旧的停等实现以便 A/B
+        if std::env::var_os("WETYPE_STOPWAIT").is_some() {
+            self.run_stopwait(c, reused, audio, partial).await
+        } else {
+            self.run_pipeline(c, audio, partial).await
+        }
+    }
+}
+
+impl WeTypeEngine {
+    /// 旧实现：严格一问一答，连接留用
+    async fn run_stopwait(&self, c: Client, reused: bool, mut audio: crate::audio::Lead, partial: Partial) -> Result<String> {
         let mut up = Upload {
             c, reused,
             voice_id: uuid::Uuid::new_v4().simple().to_string(),
@@ -130,6 +144,109 @@ impl Engine for WeTypeEngine {
         let text = if up.polished.is_empty() { std::mem::take(&mut up.text) } else { std::mem::take(&mut up.polished) };
         *self.client.lock().await = Some(up.c);
         Ok(text)
+    }
+
+    /// 方案 A 原型：发送侧只发不等回复，接收任务持续收并更新文字
+    async fn run_pipeline(&self, c: Client, mut audio: crate::audio::Lead, partial: Partial) -> Result<String> {
+        let key = c.key()?.to_vec();
+        let (sink, stream) = c.ws.split();
+        let shared = Arc::new(StdMutex::new(VoiceState::default()));
+        let _rx = AbortOnDrop(tokio::spawn(receive(stream, key.clone(), shared.clone(), partial)));
+        let mut tx = Sender {
+            sink, key, uin: c.uin, task: c.task,
+            voice_id: uuid::Uuid::new_v4().simple().to_string(),
+            total: 0, seq: 0,
+        };
+        let mut enc = opus::Opus::new(opus::AUDIO, 64000, 9)?;
+        let mut packets: Vec<Vec<u8>> = Vec::new();
+        while let Some(frame) = audio.recv().await {
+            packets.push(enc.encode(&frame)?);
+            if packets.len() >= PACKETS_PER_REQUEST {
+                tx.upload(&packets, false).await?;
+                packets.clear();
+            }
+        }
+        tx.upload(&packets, true).await?;
+        // 松手后等定稿：回复是累计全文，接收任务持续覆盖共享态，这里只需读
+        for _ in 0..8 {
+            if !shared.lock().unwrap().polished.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            tx.voice_send(None, 0, true).await?;
+        }
+        let s = shared.lock().unwrap();
+        Ok(if s.polished.is_empty() { s.text.clone() } else { s.polished.clone() })
+    }
+}
+
+/// 流水线接收侧：把回复的累计全文写进共享态，并回调增量
+#[derive(Default)]
+struct VoiceState {
+    text: String,
+    polished: String,
+}
+
+async fn receive(mut stream: SplitStream<Ws>, key: Vec<u8>, shared: Arc<StdMutex<VoiceState>>, partial: Partial) -> Result<()> {
+    loop {
+        let raw = match ws::recv_opt(&mut stream, Duration::from_secs(30)).await {
+            Ok(Some(raw)) => raw,
+            Ok(None) => continue,
+            Err(e) => return Err(e),
+        };
+        // 空包/错误回复跳过，不打断整条流
+        let Ok((text, polished)) = decode_reply(&raw).and_then(|r| parse_voice_reply(&key, &r)) else { continue };
+        let mut show = None;
+        {
+            let mut s = shared.lock().unwrap();
+            if !text.is_empty() {
+                s.text = text.clone();
+                show = Some(text);
+            }
+            if !polished.is_empty() {
+                s.polished = polished;
+            }
+        }
+        if let Some(t) = show {
+            partial(&t);
+        }
+    }
+}
+
+/// 流水线发送侧：只发不等回复，task_id 自行递增
+struct Sender {
+    sink: SplitSink<Ws, Message>,
+    key: Vec<u8>,
+    uin: String,
+    task: u64,
+    voice_id: String,
+    total: usize,
+    seq: u64,
+}
+
+impl Sender {
+    async fn voice_send(&mut self, opus: Option<&[u8]>, seq: u64, is_end: bool) -> Result<()> {
+        self.task += 1;
+        let pkt = VoicePacket { voice_id: &self.voice_id, opus, seq, total: self.total, is_end };
+        let body = voice_body(&self.key, &pkt);
+        let frame = build_frame(&self.uin, Some(&self.key), self.task, "/api_v2", body, CMD_VOICE, "2", "");
+        self.sink.send(Message::Binary(frame.into())).await?;
+        Ok(())
+    }
+
+    async fn upload(&mut self, batch: &[Vec<u8>], is_end: bool) -> Result<()> {
+        self.seq += 1;
+        let mut framed = Vec::new();
+        if self.seq == 1 {
+            framed.extend_from_slice(b"#!OPUS_RAW_V1");
+            framed.extend_from_slice(&[2, 1, 0]);
+        }
+        for p in batch {
+            framed.extend_from_slice(&[(p.len() & 0xff) as u8, (p.len() >> 8) as u8]);
+            framed.extend_from_slice(p);
+        }
+        self.total += framed.len();
+        self.voice_send(Some(&framed), self.seq, is_end).await
     }
 }
 
@@ -239,32 +356,10 @@ impl Client {
     }
 
     async fn voice(&mut self, p: &VoicePacket<'_>) -> Result<(String, String)> {
-        let mut inner = PBuf::new().s(2, p.voice_id);
-        if let Some(o) = p.opus.filter(|o| !o.is_empty()) {
-            inner = inner.b(4, o);
-        }
-        inner = inner.v(5, 5);
-        if p.is_end {
-            inner = inner.v(6, 1);
-        }
-        inner = inner.v(7, p.seq);
-        if p.total > 0 {
-            inner = inner.v(11, p.total as u64);
-        }
-        inner = inner.v(22, 1).v(23, 1).v(24, 1);
-        let outer = PBuf::new().m(1, inner);
-        let body = aes_enc(self.key()?, &snappy::compress(&outer.0));
+        let key = self.key()?.to_vec();
+        let body = voice_body(&key, p);
         let r = self.roundtrip("/api_v2", body, CMD_VOICE, "2", "").await?;
-        if r.status != 200 || r.body.is_empty() {
-            bail!("微信语音请求失败 {}", r.status);
-        }
-        let mut plain = aes_dec(self.key()?, &r.body)?;
-        if r.headers.get("Kb-CompressionType").or(r.headers.get("CompressionType")).map(String::as_str) == Some("2") {
-            plain = snappy::decompress(&plain)?;
-        }
-        let top = pb::parse(&plain)?;
-        let f = pb::parse(top.bytes(1).unwrap_or(&plain))?;
-        Ok((f.string(4).unwrap_or_default(), f.string(14).unwrap_or_default()))
+        parse_voice_reply(&key, &r)
     }
 
     async fn request(&mut self, path: &str, body: Vec<u8>, cmd: u64, token: &str) -> Result<Vec<u8>> {
@@ -290,69 +385,112 @@ impl Client {
             self.task += 1;
         }
         let task_id = if dh || gen_uin { cmd } else { self.task };
-        let trace = rand_lower(16);
-        let md5 = md5_upper(&body);
-        let ts = now_ms().to_string();
-        let signed: Vec<String> = if dh {
-            vec![OS_TYPE.into(), VERSION.into(), PLATFORM.into(), ts.clone(), md5.clone(), trace.clone(), cmd.to_string()]
-        } else if gen_uin {
-            vec![OS_TYPE.into(), VERSION.into(), PLATFORM.into(), ts.clone(), md5.clone(), token.into(), trace.clone(), cmd.to_string()]
-        } else {
-            vec![OS_TYPE.into(), VERSION.into(), PLATFORM.into(), cmd.to_string(), "0".into(), ts.clone(), md5.clone(),
-                 self.uin.clone(), trace.clone(), task_id.to_string()]
-        };
-        let sign = hex::encode_upper(Sha256::digest(format!("{}{SIGN_KEY}", signed.concat())));
-
-        let mut headers: Vec<(String, String)> = Vec::new();
-        if !token.is_empty() {
-            headers.push(("Kb-GenUinToken".into(), token.into()));
-        }
-        headers.push(("Kb-Uin".into(), self.uin.clone()));
-        if dh || gen_uin {
-            headers.push(("Kb-DeviceCodeRestrictionV2".into(), "1".into()));
-        }
-        if !dh {
-            if let Some(k) = &self.session_key {
-                headers.push(("Kb-SharedKeySuffix".into(), String::from_utf8_lossy(&k[k.len() - 4..]).into()));
-            }
-            headers.push(("Kb-CmdId".into(), cmd.to_string()));
-            headers.push(("Kb-SubCmdId".into(), "0".into()));
-        }
-        for (k, v) in [
-            ("Kb-OsType", OS_TYPE), ("Kb-Version", VERSION), ("Kb-SystemVersion", "27.0.0"),
-            ("Kb-PackageType", "3"), ("Use_DebugNet", "0"), ("Kb-TimeStamp", &ts), ("Kb-BodyMd5", &md5),
-            ("Kb-TraceId", &trace), ("Kb-TaskId", &task_id.to_string()), ("Kb-Scene", "2"),
-            ("Kb-Sign", &sign), ("Content-Length", &body.len().to_string()),
-            ("Kb-CompressionType", compress), ("Content-Type", "application/octet-stream"), ("HOST", HOST),
-        ] {
-            headers.push((k.into(), v.into()));
-        }
-        let mut http = PBuf::new().s(1, "POST").s(3, path).s(4, "");
-        for (k, v) in &headers {
-            http = http.kv(5, k, v);
-        }
-        http = http.b(6, &body);
-        let frame = PBuf::new().v(1, 0).v(2, 0).v(3, task_id).m(5, http);
-        self.ws.send(Message::Binary(frame.0.into())).await?;
-
+        let frame = build_frame(&self.uin, self.session_key.as_deref(), task_id, path, body, cmd, compress, token);
+        self.ws.send(Message::Binary(frame.into())).await?;
         let raw = ws::recv(&mut self.ws, Duration::from_secs(15)).await?;
-        let fields = match pb::parse(&raw)?.bytes(4) {
-            Some(b) => pb::parse(b)?,
-            None => pb::Fields(vec![]),
-        };
-        let mut out = HashMap::new();
-        for (f, v) in &fields.0 {
-            let pb::Val::Bytes(d) = v else { continue };
-            if *f == 5 {
-                continue;
-            }
-            let Ok(kv) = pb::parse(d) else { continue };
-            if let (Some((_, pb::Val::Bytes(k))), Some((_, pb::Val::Bytes(v)))) = (kv.0.first(), kv.0.get(1)) {
-                out.insert(String::from_utf8_lossy(k).into_owned(), String::from_utf8_lossy(v).into_owned());
-            }
-        }
-        Ok(Reply { status: fields.varint(2).unwrap_or(0), headers: out, body: fields.bytes(5).unwrap_or_default().to_vec() })
+        decode_reply(&raw)
     }
+}
+
+/// 组一条 WSS 请求帧（含签名头），task_id 由调用方定
+fn build_frame(uin: &str, key: Option<&[u8]>, task_id: u64, path: &str, body: Vec<u8>, cmd: u64, compress: &str, token: &str) -> Vec<u8> {
+    let (dh, gen_uin) = (cmd == CMD_DH, cmd == CMD_UIN);
+    let trace = rand_lower(16);
+    let md5 = md5_upper(&body);
+    let ts = now_ms().to_string();
+    let signed: Vec<String> = if dh {
+        vec![OS_TYPE.into(), VERSION.into(), PLATFORM.into(), ts.clone(), md5.clone(), trace.clone(), cmd.to_string()]
+    } else if gen_uin {
+        vec![OS_TYPE.into(), VERSION.into(), PLATFORM.into(), ts.clone(), md5.clone(), token.into(), trace.clone(), cmd.to_string()]
+    } else {
+        vec![OS_TYPE.into(), VERSION.into(), PLATFORM.into(), cmd.to_string(), "0".into(), ts.clone(), md5.clone(),
+             uin.into(), trace.clone(), task_id.to_string()]
+    };
+    let sign = hex::encode_upper(Sha256::digest(format!("{}{SIGN_KEY}", signed.concat())));
+
+    let mut headers: Vec<(String, String)> = Vec::new();
+    if !token.is_empty() {
+        headers.push(("Kb-GenUinToken".into(), token.into()));
+    }
+    headers.push(("Kb-Uin".into(), uin.into()));
+    if dh || gen_uin {
+        headers.push(("Kb-DeviceCodeRestrictionV2".into(), "1".into()));
+    }
+    if !dh {
+        if let Some(k) = key {
+            headers.push(("Kb-SharedKeySuffix".into(), String::from_utf8_lossy(&k[k.len() - 4..]).into()));
+        }
+        headers.push(("Kb-CmdId".into(), cmd.to_string()));
+        headers.push(("Kb-SubCmdId".into(), "0".into()));
+    }
+    for (k, v) in [
+        ("Kb-OsType", OS_TYPE), ("Kb-Version", VERSION), ("Kb-SystemVersion", "27.0.0"),
+        ("Kb-PackageType", "3"), ("Use_DebugNet", "0"), ("Kb-TimeStamp", &ts), ("Kb-BodyMd5", &md5),
+        ("Kb-TraceId", &trace), ("Kb-TaskId", &task_id.to_string()), ("Kb-Scene", "2"),
+        ("Kb-Sign", &sign), ("Content-Length", &body.len().to_string()),
+        ("Kb-CompressionType", compress), ("Content-Type", "application/octet-stream"), ("HOST", HOST),
+    ] {
+        headers.push((k.into(), v.into()));
+    }
+    let mut http = PBuf::new().s(1, "POST").s(3, path).s(4, "");
+    for (k, v) in &headers {
+        http = http.kv(5, k, v);
+    }
+    http = http.b(6, &body);
+    PBuf::new().v(1, 0).v(2, 0).v(3, task_id).m(5, http).0
+}
+
+/// 解 WSS 回复帧的外层：status / headers / body
+fn decode_reply(raw: &[u8]) -> Result<Reply> {
+    let fields = match pb::parse(raw)?.bytes(4) {
+        Some(b) => pb::parse(b)?,
+        None => pb::Fields(vec![]),
+    };
+    let mut out = HashMap::new();
+    for (f, v) in &fields.0 {
+        let pb::Val::Bytes(d) = v else { continue };
+        if *f == 5 {
+            continue;
+        }
+        let Ok(kv) = pb::parse(d) else { continue };
+        if let (Some((_, pb::Val::Bytes(k))), Some((_, pb::Val::Bytes(v)))) = (kv.0.first(), kv.0.get(1)) {
+            out.insert(String::from_utf8_lossy(k).into_owned(), String::from_utf8_lossy(v).into_owned());
+        }
+    }
+    Ok(Reply { status: fields.varint(2).unwrap_or(0), headers: out, body: fields.bytes(5).unwrap_or_default().to_vec() })
+}
+
+/// 语音请求体：内层 protobuf → 外层 → snappy + AES
+fn voice_body(key: &[u8], p: &VoicePacket<'_>) -> Vec<u8> {
+    let mut inner = PBuf::new().s(2, p.voice_id);
+    if let Some(o) = p.opus.filter(|o| !o.is_empty()) {
+        inner = inner.b(4, o);
+    }
+    inner = inner.v(5, 5);
+    if p.is_end {
+        inner = inner.v(6, 1);
+    }
+    inner = inner.v(7, p.seq);
+    if p.total > 0 {
+        inner = inner.v(11, p.total as u64);
+    }
+    inner = inner.v(22, 1).v(23, 1).v(24, 1);
+    let outer = PBuf::new().m(1, inner);
+    aes_enc(key, &snappy::compress(&outer.0))
+}
+
+/// 解语音回复：AES → snappy → protobuf，返回（累计文本, 整理定稿）
+fn parse_voice_reply(key: &[u8], r: &Reply) -> Result<(String, String)> {
+    if r.status != 200 || r.body.is_empty() {
+        bail!("微信语音请求失败 {}", r.status);
+    }
+    let mut plain = aes_dec(key, &r.body)?;
+    if r.headers.get("Kb-CompressionType").or(r.headers.get("CompressionType")).map(String::as_str) == Some("2") {
+        plain = snappy::decompress(&plain)?;
+    }
+    let top = pb::parse(&plain)?;
+    let f = pb::parse(top.bytes(1).unwrap_or(&plain))?;
+    Ok((f.string(4).unwrap_or_default(), f.string(14).unwrap_or_default()))
 }
 
 fn md5_upper(d: &[u8]) -> String {
