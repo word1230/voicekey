@@ -6,6 +6,11 @@
 //!
 //! 规则的 `app_id` 在安装时**运行时从 KWin 查得**（见 [`probe`]），不假设等于进程名：
 //! 断言错误的 app_id 会让规则静默不生效，症状是"浮层看起来没装规则"。
+//!
+//! 同一个管道也用来把窗口现状读回来：`probe`（有哪些窗口、浮层可用区域）、[`dump`]
+//! （窗口被摆成什么样）。对着比出结论的判定在 [`check`]。
+
+pub mod check;
 
 use crate::overlay::{bottom_center, Area, HUD_BOTTOM_MARGIN, HUD_H, HUD_W};
 
@@ -108,8 +113,32 @@ pub struct Probe {
     pub area: Option<Area>,
 }
 
+/// 一扇窗口**当前被摆成什么样**：几何 + 置顶 / 装饰 / 焦点 / 所在层。
+///
+/// 规则装没装是一回事，装完 KWin 到底给没给这几样是另一回事——键名写错时 KWin 静默不生效，
+/// 只有把窗口现况读回来才能发现（`vk-kwin check` 干的就是这个）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowState {
+    /// KWin 的 `resourceClass`（规则里 `wmclass` 比的就是它）
+    pub class: String,
+    /// 窗口标题（浮层是 `hud` / `pick`）
+    pub title: String,
+    pub x: i64,
+    pub y: i64,
+    pub w: i64,
+    pub h: i64,
+    pub active: bool,
+    pub wants_input: bool,
+    pub keep_above: bool,
+    pub no_border: bool,
+    pub skip_taskbar: bool,
+    /// 合成器里的层：普通窗口 2、置顶 3
+    pub layer: i32,
+}
+
 const WINDOW_TAG: &str = "VKWIN|";
 const AREA_TAG: &str = "VKAREA|";
+const DUMP_TAG: &str = "VKD|";
 
 /// 解析探针输出。探针的 `print()` 经 journald 中转，每行前面有 journal 自己的前缀，
 /// 所以按标记找而不是按行首；标题排在最后一段（可能含 `|`）。坏行跳过而不是猜。
@@ -124,14 +153,56 @@ pub fn parse_probe(out: &str) -> Probe {
                 }
             }
         } else if let Some((_, rest)) = line.split_once(AREA_TAG) {
-            let n: Vec<f64> = rest.trim().split(',').filter_map(|s| s.trim().parse().ok()).collect();
-            if let [x, y, w, h] = n[..] {
+            if let [x, y, w, h] = numbers(rest)[..] {
                 // KWin 的可用区域是逻辑像素，与位置规则同一空间
                 p.area = Some(Area { x, y, w, h, scale: 1.0, physical: false });
             }
         }
     }
     p
+}
+
+/// 解析 `dump` 的输出。做派与 [`parse_probe`] 一致：按标记找（journal 会给每行加前缀）、
+/// 标题排最后一段（可能含 `|`）、坏行跳过而不是猜。
+pub fn parse_dump(out: &str) -> Vec<WindowState> {
+    out.lines().filter_map(|line| parse_dump_line(line.split_once(DUMP_TAG)?.1)).collect()
+}
+
+/// `VKD|` 之后的那一段：`class|geom|active|wantsInput|keepAbove|noBorder|skipTaskbar|layer|title`
+fn parse_dump_line(rest: &str) -> Option<WindowState> {
+    let f: Vec<&str> = rest.splitn(9, '|').collect();
+    let [class, geom, active, wants_input, keep_above, no_border, skip_taskbar, layer, title] = f[..] else {
+        return None;
+    };
+    let [x, y, w, h] = numbers(geom)[..] else { return None };
+    Some(WindowState {
+        class: class.into(),
+        title: title.into(),
+        x: x as i64,
+        y: y as i64,
+        w: w as i64,
+        h: h as i64,
+        active: parse_bool(active)?,
+        wants_input: parse_bool(wants_input)?,
+        keep_above: parse_bool(keep_above)?,
+        no_border: parse_bool(no_border)?,
+        skip_taskbar: parse_bool(skip_taskbar)?,
+        layer: layer.trim().parse().ok()?,
+    })
+}
+
+/// 逗号分隔的数字串（`620,936,680,120`）——空的、少一个、多一个都当坏数据
+fn numbers(s: &str) -> Vec<f64> {
+    s.trim().split(',').filter_map(|p| p.trim().parse().ok()).collect()
+}
+
+/// KWin 脚本里布尔打印成 `true` / `false`，别的值当坏行
+fn parse_bool(s: &str) -> Option<bool> {
+    match s.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
 }
 
 /// `[General] Order` 的新值：删掉 `drop` 里已有的，再把 `keep` 补到末尾。
@@ -184,8 +255,8 @@ pub fn parse_ini(text: &str) -> Vec<IniGroup> {
 
 /// 浮层窗口的标题（`ui.rs` 的 `overlay()` 拿 label 当标题）。规则里的 `title` 正则由它拼出，
 /// 所以 `ui.rs` 那边改了标题这里的正则就跟着失效——两处是一件事，一起改
-const HUD_TITLE: &str = "hud";
-const PICK_TITLE: &str = "pick";
+pub const HUD_TITLE: &str = "hud";
+pub const PICK_TITLE: &str = "pick";
 const OVERLAY_TITLES: [&str; 2] = [HUD_TITLE, PICK_TITLE];
 /// 设置窗口的标题（同上，`ui.rs` 的 `show_settings`）
 const SETTINGS_TITLE: &str = "VoiceKey 设置";
@@ -239,30 +310,56 @@ if (a) {
 }
 "#;
 
+/// 窗口现况脚本：把每扇窗口的几何与置顶 / 装饰 / 焦点 / 层打到 journal。
+/// 类名在前、标题最后（标题里可能带 `|`）。
+const DUMP_JS: &str = r#"
+var list = workspace.windowList();
+for (var i = 0; i < list.length; i++) {
+    var w = list[i];
+    var g = w.frameGeometry;
+    print("VKD|" + w.resourceClass + "|" + g.x + "," + g.y + "," + g.width + "," + g.height +
+        "|" + w.active + "|" + w.wantsInput + "|" + w.keepAbove + "|" + w.noBorder + "|" +
+        w.skipTaskbar + "|" + w.layer + "|" + w.caption);
+}
+"#;
+
 /// 问 KWin 现在有什么：映射中的窗口（app_id 从这儿取）+ 浮层的可用区域（位置从这儿算）
 pub fn probe() -> Result<Probe, String> {
+    Ok(parse_probe(&run_kwin_script(PROBE_JS, "vk-kwin-probe", &[WINDOW_TAG, AREA_TAG])?))
+}
+
+/// 问 KWin 现在**把窗口摆成了什么样**（几何、置顶、装饰、焦点、层）。
+/// 规则装没装是一回事，KWin 有没有照做是另一回事——键名错了它静默不生效。
+pub fn dump() -> Result<Vec<WindowState>, String> {
+    Ok(parse_dump(&run_kwin_script(DUMP_JS, "vk-kwin-dump", &[DUMP_TAG])?))
+}
+
+/// 跑一段 KWin 脚本，把它的 `print()` 产出从 journal 里捞回来。
+///
+/// 脚本落在临时目录、用 `pid` 拼出唯一名字，跑完（成或败）都卸载并删掉文件；
+/// journald 落地有一点延迟，轮询到 `markers` 里任意一个标记出现为止。
+fn run_kwin_script(js: &str, name: &str, markers: &[&str]) -> Result<String, String> {
     let since = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| format!("系统时间不对：{e}"))?
         .as_secs()
         .saturating_sub(1);
-    let path = std::env::temp_dir().join(format!("vk-kwin-probe-{}.js", std::process::id()));
-    std::fs::write(&path, PROBE_JS).map_err(|e| format!("写探针脚本 {} 失败：{e}", path.display()))?;
-    let name = format!("vk-kwin-probe-{}", std::process::id());
+    let name = format!("{name}-{}", std::process::id());
+    let path = std::env::temp_dir().join(format!("{name}.js"));
+    std::fs::write(&path, js).map_err(|e| format!("写脚本 {} 失败：{e}", path.display()))?;
     let ran = run_script(&path, &name);
-    // 探针不留残留：成败都卸，也不写 kwinrc
+    // 不留残留：成败都卸，也不写 kwinrc
     let _ = run("qdbus6", &["org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting.unloadScript", &name]);
     let _ = std::fs::remove_file(&path);
     ran?;
-    // journald 落地有一点延迟，轮询到有输出为止
     for _ in 0..20 {
         let log = journal(since);
-        if log.contains(WINDOW_TAG) || log.contains(AREA_TAG) {
-            return Ok(parse_probe(&log));
+        if markers.iter().any(|m| log.contains(m)) {
+            return Ok(log);
         }
         thread::sleep(Duration::from_millis(100));
     }
-    Err("KWin 没在 2 秒内把探针结果写进 journal：确认本机是 KWin Wayland 会话，\
+    Err("KWin 没在 2 秒内把脚本结果写进 journal：确认本机是 KWin Wayland 会话，\
          且 `journalctl --user -u plasma-kwin_wayland` 有输出"
         .into())
 }
@@ -281,7 +378,7 @@ pub fn install(app_id: &str, area: &Area) -> Result<Vec<Rule>, String> {
         return Err("app_id 是空的：空的 `wmclass=` 会匹配到所有窗口".into());
     }
     let rules = vec![hud_rule(app_id, area), pick_rule(app_id)];
-    let groups = parse_ini(&read_rules()?);
+    let groups = installed_groups()?;
     // 先删后写：删自己的组（旧版本可能多写过键）与那条失败的手写规则
     for name in MANAGED_GROUPS.iter().chain(STALE_GROUPS) {
         delete_group(&groups, name)?;
@@ -303,7 +400,7 @@ pub fn install(app_id: &str, area: &Area) -> Result<Vec<Rule>, String> {
 ///
 /// 读自己刚写的组，不另起一个 `kreadconfig` 进程——`kwinrulesrc` 的读写都在这一个模块里。
 pub fn installed_app_id() -> Option<String> {
-    let groups = parse_ini(&read_rules().ok()?);
+    let groups = installed_groups().ok()?;
     MANAGED_GROUPS.iter().find_map(|g| wmclass_of(&groups, g))
 }
 
@@ -319,7 +416,7 @@ fn wmclass_of(groups: &[IniGroup], group: &str) -> Option<String> {
 
 /// 卸载：只删自己装的组与 `Order` 里的自己，别人的规则（含系统级的）一个不动
 pub fn uninstall() -> Result<(), String> {
-    let groups = parse_ini(&read_rules()?);
+    let groups = installed_groups()?;
     for name in MANAGED_GROUPS {
         delete_group(&groups, name)?;
     }
@@ -385,6 +482,11 @@ fn rules_path() -> Result<PathBuf, String> {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .ok_or("既没有 XDG_CONFIG_HOME 也没有 HOME，找不到 kwinrulesrc")?;
     Ok(home.join(RULES_FILE))
+}
+
+/// 用户侧 `kwinrulesrc` 解析出来的组（`check` 拿它跟"该有的规则"比）
+pub fn installed_groups() -> Result<Vec<IniGroup>, String> {
+    Ok(parse_ini(&read_rules()?))
 }
 
 fn read_rules() -> Result<String, String> {

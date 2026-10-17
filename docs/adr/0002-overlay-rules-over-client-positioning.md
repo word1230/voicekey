@@ -37,6 +37,10 @@ KWin 窗口规则（`~/.config/kwinrulesrc`）决定；应用侧不改（`set_po
   Remember=4, ApplyNow=5, ForceTemporarily=6`），`2` 是 **Force**，`Apply Initially` 是 `3`；
   而 `acceptfocus` 在 KWin 里是 `forceRule`，只收 1/2/6——同一个文件里两种策略数值并存是
   正常的，改的时候别"统一"成一个值。
+- **重载不追认已经开着的窗口**：`install` 之后 KWin 重载规则，但已经映射的浮层只吃到
+  `acceptfocus` 这一项（它在 KWin 里是 `forceRule`，持续强制），`above` / `decorationpolicy`
+  / `skiptaskbar` / `position` 都要等那个窗口下次映射。于是"装完立刻去看旧窗口"会看到半吊子
+  状态，`check` 会照实报 FAIL——重启应用或让浮层重开一次再验收。
 - **幂等**：两条规则各占一个固定组名（`voicekey-hud` / `voicekey-pick`），安装时先删同名组
   再写，`[General] Order` 只追加、不重复；别人的规则（如系统 `/etc/xdg/kwinrulesrc` 里的）
   一概不动。重复执行后 `kwinrulesrc` 逐字节相同。

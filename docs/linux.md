@@ -56,7 +56,7 @@ Linux 不独占设备，因此**不吞键**：钩子只观察、不拦截。这�
 ## 浮层与 KWin 窗口规则
 
 目标环境是 KDE Plasma 6 / KWin 6（Wayland）（[ADR 0001](adr/0001-linux-targets-kwin-wayland.md)）。
-`hud` / `pick`（[术语](GLOSSARY.md)：HUD / Pick panel）是 `680×120` / `520×N` 的**透明顶层
+`hud` / `pick`（[术语](../GLOSSARY.md)：HUD / Pick panel）是 `680×120` / `520×N` 的**透明顶层
 窗口**，内容只占其中一小块（胶囊浮条、候选列表），其余全透明。macOS / Windows 下窗口无边框
 无阴影，看不出窗口本体；但在 Wayland 下有三件事客户端无能为力，只有合成器能做：
 
@@ -73,6 +73,8 @@ Linux 不独占设备，因此**不吞键**：钩子只观察、不拦截。这�
 ```bash
 cargo run -p voicekey-platform --bin vk-kwin -- probe      # 看 KWin 里有哪些窗口、app_id 会取哪个
 cargo run -p voicekey-platform --bin vk-kwin -- install    # 装（幂等）
+cargo run -p voicekey-platform --bin vk-kwin -- dump       # 看 KWin 把每扇窗口摆成了什么样
+cargo run -p voicekey-platform --bin vk-kwin -- check      # 验收：文件里的规则 + KWin 现在的表现
 cargo run -p voicekey-platform --bin vk-kwin -- uninstall  # 卸（只删自己装的组）
 ```
 
@@ -141,12 +143,40 @@ KWin 看到的窗口（app_id = resourceClass）：
 
 ### 装了之后
 
-- 新映射的浮层**立刻**生效。重载那一刻**已经开着**的窗口也会被重新评估（实测 `above` /
-  不抢焦点当场生效），但它的窗口尺寸要等自己 resize 才更新——位置与装饰以"装完之后新开的
-  浮层"为准。
+- **新映射的浮层立刻生效**；重载那一刻**已经开着**的浮层只吃到一半：`acceptfocus` 是
+  `forceRule`（持续强制），当场就不再有焦点，但 `above` / `decorationpolicy` / `skiptaskbar`
+  / `position` 都**不会追认**，要等它下次映射。实测装完规则、`dump` 那扇装之前就开着的
+  HUD：`active=false wantsInput=false`（这一项生效了）但 `keepAbove=false noBorder=false
+  skipTaskbar=false`、位置仍是屏幕正中 `620,502`。所以装完之后**重启一下应用**（或按住
+  热键让浮层重开一次）再验收，别拿旧窗口判规则没生效。
 - 换分辨率 / 接外接屏 / 改工作区尺寸后位置会不对：重跑一次 `install`——`position` 是死坐标，
   KWin 不会替你重算（[ADR 0002](adr/0002-overlay-rules-over-client-positioning.md)）。
 - 卸载只删 `voicekey-hud` / `voicekey-pick` 两个组和它们在 `[General] Order` 里的引用。
+
+### 验收：`vk-kwin dump` / `check`
+
+KWin 对两类毛病都是**静默**的：规则文件里键名写错 / 组没进 `Order`，和规则写对了但窗口没被
+摆成那样。所以验收分两层，`check` 各给一条条结论：
+
+- **静态层**（读 `kwinrulesrc`，随时可跑）：我们该有的两组 vs 文件里实际的组——组在不在、
+  `Order` 里有没有、每个键的值对不对、有没有**多出来的键**（最后一个专抓 KWin 迁移老键名：
+  它会把 `noborder` 换成 `decorationpolicy` 并回写文件）。
+- **行为层**（跑 KWin 脚本读现在的窗口）：`app_id`、`active` / `wantsInput`、`noBorder`、
+  `keepAbove`、`skipTaskbar`、尺寸（hud 连高度一起验 `680x120`；pick 高度随候选行数变，
+  只验宽 `520`），hud 另验位置 `620,936`。尺寸不对时那条会提示多半是前端没在渲染。
+
+**浮层此刻没映射时是「跳过」而不是通过**——没东西可看就别报绿。默认跳过不报错（`check`
+在只有静态层可验时仍有意义），`--require-overlays` 把跳过也算失败，给"必须验到"的场合。
+退出码：有 FAIL（或 `--require-overlays` 下的 skip）就非零。
+
+`dump` 是行为层看到的原始事实，一行一扇窗口，自己比对时用：
+
+```
+$ vk-kwin dump
+plasmashell                                 0,0     1920x1080 active=false wantsInput=true keepAbove=false noBorder=false skipTaskbar=true layer=0
+com.mitchellh.ghostty        ◑ #3 完成状态      0,44    1920x1036 active=true wantsInput=true keepAbove=false noBorder=false skipTaskbar=false layer=2
+voicekey                     hud          620,936    680x120  active=false wantsInput=false keepAbove=true noBorder=true skipTaskbar=true layer=3
+```
 
 更彻底的路子是 wlr-layer-shell 表面（`tauri::WebviewWindow::gtk_window()` 拿到 GtkWindow，
 配 gtk-layer-shell）：合成器根本不把它当普通窗口，也就无所谓规则。但那要另写一条窗口创建
@@ -209,9 +239,19 @@ gdbus call -e -d $BUS -o /org/ayatana/NotificationItem/tray_icon_tray_app_main/M
 它的钩子会跳过），`UI_SET_KEYBIT` 要把字母键一起声明上（钩子按「有没有 KEY_A / KEY_ESC /
 KEY_ENTER」判断是不是键盘）。建设备后等 3 秒——应用的钩子每 2 秒扫一次 `/dev/input`。
 
-**坑**：写完 `EV_KEY` 必须再写一个 `EV_SYN` / `SYN_REPORT`（type 0, code 0, value 0），否则内核
-不把这一包交给任何 evdev 读者：应用收不到、KWin 也收不到，KWin 脚本里什么都看不到，而
-python-evdev 那边同样静默。少了这一个 SYN，整件事看上去就像"钩子坏了"。
+三个坑，都表现成"什么都没发生"：
+
+1. **写完 `EV_KEY` 必须再补一个 `EV_SYN` / `SYN_REPORT`**（type 0, code 0, value 0），否则内核
+   不把这一包交给任何 evdev 读者：应用收不到、KWin 也收不到，KWin 脚本里什么都看不到，
+   python-evdev 那边同样静默。少了这一个 SYN，整件事看上去就像"钩子坏了"。
+2. **同名设备在一个应用进程里只会被认领一次**：同一进程内第二次注入（哪怕销毁旧设备、重建
+   同名设备）浮层不再出现——钩子扩进的是已经 stale 的 fd。**每次注入前先重启应用**。
+3. **重启用 `pkill -x voicekey`，别用 `pkill -f <路径>`**：`-f` 拿整条命令行匹配，会连你自己
+   那条 `bash -c '… pkill -f target/debug/voicekey …'` 一起杀掉，当场自杀、退出码 144。
+
+所以一次完整的编排是：`pkill -x voicekey` → 起应用（webview 要有前端在渲染）→
+`sleep 4` 让钩子扫到设备 → 注入并**长按住**（≥30s，留出截图与 `check` 的时间）→
+`vk-kwin check` / `dump` / 截图。
 
 ### mac / Windows 编译回归在本机能验到哪
 
@@ -255,8 +295,9 @@ python-evdev 那边同样静默。少了这一个 SYN，整件事看上去就像
 
 ### KDE Plasma 6.8 / KWin 6.8（当前环境）
 
-- `cargo check --workspace` 无警告；`cargo test --workspace` 全绿（`crates/platform` 19 项：
-  浮层几何、规则生成、探针解析、INI 读写、`Order` 合并）；mac / Windows 的编译回归：
+- `cargo check --workspace --all-targets` 无警告；`cargo test --workspace` 全绿（`crates/platform`
+  28 项：浮层几何、规则生成、探针解析、INI 读写、`Order` 合并、`check` 的判定逻辑——含装上
+  规则 / 未装规则的 HUD 实测基线各一条）；mac / Windows 的编译回归：
   `cargo check -p voicekey-platform --target x86_64-apple-darwin` 与 `--target
   x86_64-pc-windows-msvc` 均通过
 - `vk-kwin probe` 在真应用上认出了 `app_id=voicekey`（`resourceClass`，标题 `VoiceKey 设置`），
@@ -278,6 +319,17 @@ python-evdev 那边同样静默。少了这一个 SYN，整件事看上去就像
   `layer=3`，而前台窗口仍是 Ghostty（键盘焦点没被抢走）。同一窗口**未装规则**时是
   `geom=620,502`（屏幕正中——`overlay.rs` 算的 `620,936` 被 Wayland 忽略）、`active=true`、
   `wantsInput=true`、`keepAbove=false`、`noBorder=false`、`layer=2`
+- `vk-kwin check` 四种状态都在真应用上走过：① 浮层没映射 → 静态层 36 项 ok、行为层两条
+  `skip`，退出码 0；同一条加 `--require-overlays` 退出码 1（跳过就得是跳过的样子，不能顺手
+  报绿）。② 按住注入的热键 → 静态 36 + 行为 7 全 ok，pick 仍 `skip`（它要等候选列表出来）。
+  ③ `uninstall` 后新映射的 HUD → 9 项 FAIL（静态 4：两个组不在 `Order` 里、文件里也没这两组；
+  行为 5：焦点 / 装饰 / 置顶 / 任务栏 / 位置，位置那条报 `实际 620,502`），退出码 1。④ 重装
+  规则但**不重启应用** → 静态 36 项全 ok，行为层只过了 `app_id` 与尺寸两条、仍在这 5 条上
+  FAIL——`check` 报的是 KWin **现在的样子**，不是文件的样子，这正是行为层存在的理由
+- `vk-kwin dump` 在真桌面上的输出（节选）：`plasmashell 0,0 1920x1080 layer=0`、
+  `com.mitchellh.ghostty 0,44 1920x1036 active=true layer=2`，装上规则、按住热键时多一行
+  `voicekey hud 620,936 680x120 active=false wantsInput=false keepAbove=true noBorder=true
+  skipTaskbar=true layer=3`——前台仍是 Ghostty，键盘焦点没被抢走
 - 截图确认（不是只看 dump）：装上规则后按住热键，胶囊贴在屏幕底部居中、离底 24px，四周
   没有标题栏 / 边框 / 阴影，底下终端的状态行照常露着——这三件事确实是合成器做的
 - **装饰**这一项对照得最清楚的是替身窗口（`app_id=voicekey`、标题 `hud`、请求 `680×120`
