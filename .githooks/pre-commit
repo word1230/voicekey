@@ -1,0 +1,20 @@
+#!/bin/sh
+# 提交前：类型检查 + 前端单测。完整 Rust 测试套件在 pre-push。
+# 急着提交时用 git commit --no-verify。
+set -e
+cd "$(git rev-parse --show-toplevel)"
+
+# docs/linux.md 记的标准是「cargo check --workspace 无警告」，这里机械地卡住它。
+# cargo 默认只报 workspace 自己的 crate，依赖的警告被 --cap-lints allow 压掉。
+out=$(cargo check --workspace 2>&1) || { echo "$out"; exit 1; }
+if echo "$out" | grep -q '^warning'; then
+    echo "$out" | grep -A2 '^warning' | head -40
+    echo "── 有编译警告：docs/linux.md 的标准是 cargo check --workspace 无警告"
+    exit 1
+fi
+
+if [ -d app/node_modules ]; then
+    (cd app && npm test --silent)
+else
+    echo "跳过前端单测：app/node_modules 不存在（先 cd app && npm ci --allow-remote=all）"
+fi

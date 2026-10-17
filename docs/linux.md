@@ -90,6 +90,64 @@ window-rule {
 能拿到 GtkWindow，配合 gtk-layer-shell），那样合成器根本不当作普通窗口，也就无所谓规则；
 但目前只在 niri 上验证过规则这条路径。
 
+## 本机验收手法
+
+本机（KWin Wayland）**没有** `xdotool` / `kdotool`，客户端也拿不到窗口几何。本文档里记的
+niri 手法（`niri msg windows`、`grim`）在此一律无效，可用的是下面三件。
+
+### 窗口信息 — KWin 脚本
+
+KWin 内建 JS 引擎，脚本跑在合成器里，比任何外部工具都权威：
+
+```bash
+cat > /tmp/vkprobe/dump.js <<'EOF'
+var list = workspace.windowList();
+for (var i = 0; i < list.length; i++) {
+    var w = list[i];
+    print("VKWIN|" + w.resourceClass + "|" + w.caption + "|" +
+        w.frameGeometry.x + "," + w.frameGeometry.y + " " +
+        w.frameGeometry.width + "x" + w.frameGeometry.height +
+        "|active=" + w.active + "|keepAbove=" + w.keepAbove +
+        "|skipTaskbar=" + w.skipTaskbar);
+}
+EOF
+ID=$(qdbus6 org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript /tmp/vkprobe/dump.js vk-dump)
+qdbus6 org.kde.KWin /Scripting/Script$ID org.kde.kwin.Script.run
+journalctl --user -u plasma-kwin_wayland -n 20 --no-pager | grep VKWIN
+```
+
+`print()` 的输出进合成器的 journal，不在 stdout。收尾 `qdbus6 org.kde.KWin /Scripting
+org.kde.kwin.Scripting.unloadScript vk-dump`（`... isScriptLoaded vk-dump` 返回 `false`
+即卸净；探针**不写** `kwinrc`，不留残留）。
+
+### 托盘菜单 — dbusmenu
+
+托盘走 StatusNotifierItem，菜单是 `com.canonical.dbusmenu`，可以直接发点击事件，不必真去点屏幕：
+
+```bash
+BUS=$(busctl --user list | awk '$2==<pid> && $1 ~ /^:1\./ {print $1}')
+gdbus call -e -d $BUS -o /org/ayatana/NotificationItem/tray_icon_tray_app_main/Menu \
+  -m com.canonical.dbusmenu.GetLayout -- 0 -1 "[]"
+gdbus call -e -d $BUS -o /org/ayatana/NotificationItem/tray_icon_tray_app_main/Menu \
+  -m com.canonical.dbusmenu.Event <id> "clicked" "<''>" 0
+```
+
+两个坑：`<id>` 会随 `refresh_tray` 重建菜单而变，**每次点击前重新 `GetLayout` 取**
+（`grep -o "[0-9]*, {'label': <'退出 VoiceKey'>}"`）；variant 参数必须写 `"<''>"`，
+`"<@v ''>"` 报错，末尾那个时间戳参数不能省。
+
+### 截图 — spectacle
+
+`grim` 在 KWin 上不出图，用 `spectacle -b -n -f -o /tmp/x.png`，再 `magick` 裁剪 / 缩放。
+
+### 判定时的三个坑
+
+- **先看文本再截图**：窗口 dump、`GetLayout`、journal 能回答的先问它们；确认有东西可看
+  才落截图，贴图很贵。
+- **窗口刚打开就 dump / 截图会扑空**：先 `sleep 3` 或重采一次。
+- **`settings.json` 的 mtime 不是「设置被改过」的证据**：任何一次保存都重写文件，哪怕值
+  逐字节不变。要比内容，就 `sha256sum` / `diff`（成因见 #6）。
+
 ## 渠道
 
 | 渠道 | Linux |
