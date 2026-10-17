@@ -17,6 +17,11 @@ block2 = "0.6"
 # 读 /dev/input 全局按键 + /dev/uinput 虚拟键盘注入
 evdev = "0.13"
 
+[[bin]]
+# KWin 浮层规则的幂等安装器（仅 Linux；别的平台上只是个报错入口，见 src/bin/vk-kwin.rs）
+name = "vk-kwin"
+path = "src/bin/vk-kwin.rs"
+
 [target.'cfg(windows)'.dependencies]
 arboard = "3"
 windows = { version = "0.62", features = [

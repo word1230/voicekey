@@ -18,6 +18,10 @@ pub use imp::{caret, front_app, inject_key, paste, secure_input, start_hook, Fro
 /// 浮层几何：给定工作区与浮层尺寸算落点，应用与 KWin 规则生成共用
 pub mod overlay;
 
+/// KWin 窗口规则：生成、安装、卸载（仅 Linux；macOS / Windows 由应用自己摆窗口）
+#[cfg(target_os = "linux")]
+pub mod kwin;
+
 pub const CTRL: u8 = 1;
 pub const ALT: u8 = 2;
 pub const SHIFT: u8 = 4;
