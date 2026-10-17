@@ -14,7 +14,9 @@ if echo "$out" | grep -q '^warning'; then
 fi
 
 if [ -d app/node_modules ]; then
-    (cd app && npm test --silent)
+    # svelte-check 是让 app/tsconfig.json 那个 strict 真生效的那一步：没有它，
+    # 隐式 any 也能一路提交上去。
+    (cd app && npm run check && npm test --silent)
 else
-    echo "跳过前端单测：app/node_modules 不存在（先 cd app && npm ci --allow-remote=all）"
+    echo "跳过前端类型检查与单测：app/node_modules 不存在（先 cd app && npm ci --allow-remote=all）"
 fi

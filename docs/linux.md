@@ -300,6 +300,12 @@ KEY_ENTER」判断是不是键盘）。建设备后等 3 秒——应用的钩�
   规则 / 未装规则的 HUD 实测基线各一条）；mac / Windows 的编译回归：
   `cargo check -p voicekey-platform --target x86_64-apple-darwin` 与 `--target
   x86_64-pc-windows-msvc` 均通过
+- 前端类型检查上线：`app` 加 `npm run check`（`svelte-check` 读 `tsconfig.json` 那个 `strict`），
+  接进 `.githooks/pre-commit` 与 CI——之前 `strict: true` 谁都读不到，隐式 `any` 也能提交。
+  首跑 101 个文件报 3 处同一个毛病：`Logo.svelte` 没有 `<script>` 块，svelte2tsx 就不为它生成
+  `.d.ts`，import 它的三处全报「implicitly has an 'any' type」；补一个空的 `<script lang="ts">`
+  后 0 错 0 警。为确认它**真会**报，故意塞了个类型错：`ERROR "src/lib/Logo.svelte" 4:9 "Type
+  'string' is not assignable to type 'number'."`、退出码 1，撤掉后回到 0
 - `vk-kwin probe` 在真应用上认出了 `app_id=voicekey`（`resourceClass`，标题 `VoiceKey 设置`），
   与「进程名猜 `app_id`」是两回事
 - `vk-kwin install` 幂等：连跑三次，`~/.config/kwinrulesrc` 逐字节相同（sha256 比对），

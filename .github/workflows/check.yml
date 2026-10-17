@@ -29,5 +29,7 @@ jobs:
       # opus 走 .cargo/config.toml 的 LIBOPUS_NO_PKG，从源码静态编译，不需要 libopus
       - run: npm ci
         working-directory: app
+      - run: npm run check
+        working-directory: app
       - run: npm test
         working-directory: app

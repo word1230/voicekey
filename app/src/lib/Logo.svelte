@@ -1,3 +1,7 @@
+<!-- 无 props 的纯图形组件。这个空的 script 块是给 svelte-check 的：没有它，
+     svelte2tsx 不为本组件生成 .d.ts，import 它的地方报「implicitly has an 'any' type」。 -->
+<script lang="ts"></script>
+
 <svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <linearGradient id="vkwg" x1="0" x2="1">
