@@ -5553,6 +5553,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "futures-util",
+ "gtk",
  "hex",
  "md-5",
  "objc2",

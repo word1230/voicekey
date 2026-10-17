@@ -85,11 +85,11 @@ fn overlay<R: Runtime>(app: &AppHandle<R>, label: &str, w: f64, h: f64) -> tauri
 
 pub fn create_overlays<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let hud = overlay(app, "hud", HUD_W, HUD_H)?;
-    // Wayland 下窗口尚未映射时 gdk window 为空，set_ignore_cursor_events 会 panic
+    // pick panel 不设：它尺寸贴合内容、死区很小，且要用鼠标点选候选
     #[cfg(not(target_os = "linux"))]
-    hud.set_ignore_cursor_events(true)?;
+    hud.set_ignore_cursor_events(true)?; // HUD 是纯显示，不该吃鼠标
     #[cfg(target_os = "linux")]
-    let _ = &hud;
+    hud_click_through(&hud); // Linux 上换一条路，见函数上的说明
     let pick = overlay(app, "pick", PICK_W, 300.0)?;
     #[cfg(target_os = "macos")]
     panel::convert(&pick);
@@ -136,6 +136,55 @@ pub fn hud<R: Runtime>(app: &AppHandle<R>, state: &str, text: &str, ch: Channel)
             set_pos(&w, a.physical, x, y);
         }
         let _ = w.show();
+    }
+}
+
+/// 让 HUD 不吃鼠标：窗口是 680×120 的透明矩形，内容只占中间一条胶囊，不设输入区的话
+/// 它盖住的地方就点不下去了。
+///
+/// 做法是把顶层窗口的输入区清空（GDK `input_shape_combine_region` → Wayland 的
+/// `wl_surface.set_input_region`）。非 Linux 走 tao 的 `set_ignore_cursor_events`，Linux 上
+/// 那条路有两个坑，结论如下，逐轮实测数据与验收手法见 `docs/linux.md`「HUD 点击穿透」：
+///
+/// 1. **不能在窗口映射之前设**。tao 的实现是拿窗口的 gdk window 去设一个 1×1 的输入区
+///    （不是空区域，所以那一个像素照旧吃点击），窗口还没映射时 gdk window 是空的，
+///    tao 那边 `unwrap` 当场 panic——`create_overlays` 里 Linux 当初就是为这个整条跳过的。
+/// 2. **设早了会白设**。HUD 的 WebKit 内容起来的时候（合成层 + 入场动画）顶层 surface 的
+///    输入区会被冲回默认，映射那一刻和紧随其后设的都被冲掉，得等第一帧合成完再设才站得住。
+///    所以映射时那一遍不必指望（留着只是因为便宜无害），真正管用的是后面补的。
+///
+/// 挂在窗口的 `map` 信号上而不是跟着 `hud()` 里的 `show()`：`map` 才是「窗口真到屏幕上了」，
+/// 而且每次 hide / show 重新映射时它都会再来一发，正好每次都能把输入区补上。
+#[cfg(target_os = "linux")]
+fn hud_click_through<R: Runtime>(w: &WebviewWindow<R>) {
+    /// 第一次补设的延迟，第二次是它的一倍。早于此设会被 WebKit 的第一帧冲掉（阈值见
+    /// `docs/linux.md`）；补两遍是给冷启动、首帧来得更晚的情况兜底——清空幂等，多设一次
+    /// 没有副作用，而「点击又被吃掉」是不给任何提示的失败方式。
+    const REPLAY_MS: u64 = 400;
+    let Ok(gw) = w.gtk_window() else { return };
+    let w = w.clone();
+    gtk::prelude::WidgetExt::connect_map(&gw, move |_| {
+        clear_input_region(&w);
+        // 补的那两下：先让出这一轮事件循环，等 WebKit 把第一帧合成上去
+        let w = w.clone();
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                std::thread::sleep(Duration::from_millis(REPLAY_MS));
+                let w2 = w.clone();
+                let _ = w.run_on_main_thread(move || clear_input_region(&w2));
+            }
+        });
+    });
+}
+
+/// 把窗口的输入区设成空（0×0 的矩形区域）：窗口还在，但鼠标点到哪儿都不落它身上
+#[cfg(target_os = "linux")]
+fn clear_input_region<R: Runtime>(w: &WebviewWindow<R>) {
+    if let Ok(gw) = w.gtk_window() {
+        if let Some(win) = gtk::prelude::WidgetExt::window(&gw) {
+            let empty = gtk::gdk::cairo::Region::create_rectangle(&gtk::gdk::cairo::RectangleInt::new(0, 0, 0, 0));
+            win.input_shape_combine_region(&empty, 0, 0);
+        }
     }
 }
 
