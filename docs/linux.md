@@ -169,6 +169,19 @@ KWin 对两类毛病都是**静默**的：规则文件里键名写错 / 组没�
 在只有静态层可验时仍有意义），`--require-overlays` 把跳过也算失败，给"必须验到"的场合。
 退出码：有 FAIL（或 `--require-overlays` 下的 skip）就非零。
 
+```
+$ vk-kwin check          # 未装规则、浮层正开着（节选）
+  ok    hud：app_id 是 voicekey
+  ok    hud：窗口就是内容那 680x120
+  FAIL  voicekey-hud：组在文件里 —— 没装过，或者被删了：跑 vk-kwin install
+  FAIL  hud：不抢键盘焦点 —— active=true wantsInput=true——任一为真，正在打的字就断了
+  FAIL  hud：贴底居中（620,936） —— 实际 620,502
+  skip  pick 浮层 —— 此刻没映射：等候选列表出来再跑（或加 --require-overlays 把这条当失败）
+vk-kwin: 9 项没过（2 项过（1 项跳过未验））；上面带 FAIL 的就是
+```
+
+每条的 `why` 都写明现状或下一步（实际值、`跑 vk-kwin install`），不必再回去翻文件猜哪一项错了。
+
 `dump` 是行为层看到的原始事实，一行一扇窗口，自己比对时用：
 
 ```
