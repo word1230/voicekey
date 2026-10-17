@@ -9,25 +9,14 @@ use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, Monitor, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use voicekey_platform::overlay::{bottom_center, Area, HUD_BOTTOM_MARGIN, HUD_H, HUD_W, PICK_BOTTOM_MARGIN, PICK_W};
 
 const TRAY: &[u8] = include_bytes!("../icons/tray.png");
 const TRAY_ACTIVE: &[u8] = include_bytes!("../icons/tray-active.png");
-const HUD_W: f64 = 680.0;
-const HUD_H: f64 = 120.0;
-const PICK_W: f64 = 520.0;
 
 static HUD_TOKEN: AtomicU64 = AtomicU64::new(0);
 /// 候选面板锚点（统一坐标空间：macOS 逻辑点 / Windows 物理像素）
 static PICK_ANCHOR: Mutex<Option<Anchor>> = Mutex::new(None);
-
-#[derive(Clone, Copy)]
-struct Area {
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-    scale: f64,
-}
 
 #[derive(Clone, Copy)]
 struct Anchor {
@@ -39,38 +28,32 @@ struct Anchor {
 fn work_area(m: &Monitor) -> Area {
     let wa = m.work_area();
     let s = m.scale_factor();
-    let k = if cfg!(target_os = "macos") { s } else { 1.0 };
+    let physical = !cfg!(target_os = "macos");
+    let k = if physical { 1.0 } else { s };
     Area {
         x: wa.position.x as f64 / k,
         y: wa.position.y as f64 / k,
         w: wa.size.width as f64 / k,
         h: wa.size.height as f64 / k,
         scale: s,
+        physical,
     }
 }
 
-/// 统一坐标空间下的尺寸换算：macOS 用逻辑点，Windows 用物理像素
-fn units(a: &Area, logical: f64) -> f64 {
-    if cfg!(target_os = "macos") { logical } else { logical * a.scale }
-}
-
-fn set_pos<R: Runtime>(w: &WebviewWindow<R>, x: f64, y: f64) {
-    let _ = if cfg!(target_os = "macos") {
-        w.set_position(tauri::LogicalPosition::new(x, y))
-    } else {
+fn set_pos<R: Runtime>(w: &WebviewWindow<R>, physical: bool, x: f64, y: f64) {
+    let _ = if physical {
         w.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32))
+    } else {
+        w.set_position(tauri::LogicalPosition::new(x, y))
     };
 }
 
-/// macOS 逻辑点；Windows 用物理像素向上取整。否则 120% 缩放下 WebView 客户区比内容小一截
+/// 逻辑点直接给尺寸；物理像素向上取整，否则 120% 缩放下 WebView 客户区比内容小一截
 fn set_client<R: Runtime>(w: &WebviewWindow<R>, a: &Area, logical_w: f64, logical_h: f64) {
-    let _ = if cfg!(target_os = "macos") {
-        w.set_size(LogicalSize::new(logical_w, logical_h))
+    let _ = if a.physical {
+        w.set_size(tauri::PhysicalSize::new(a.units(logical_w).ceil() as u32, a.units(logical_h).ceil() as u32))
     } else {
-        w.set_size(tauri::PhysicalSize::new(
-            (logical_w * a.scale).ceil() as u32,
-            (logical_h * a.scale).ceil() as u32,
-        ))
+        w.set_size(LogicalSize::new(logical_w, logical_h))
     };
 }
 
@@ -148,9 +131,9 @@ pub fn hud<R: Runtime>(app: &AppHandle<R>, state: &str, text: &str, ch: Channel)
     let Some(w) = app.get_webview_window("hud") else { return };
     if !w.is_visible().unwrap_or(false) {
         if let Some(a) = cursor_area(app) {
-            let (ww, hh) = (units(&a, HUD_W), units(&a, HUD_H));
+            let (x, y) = bottom_center(&a, HUD_W, HUD_H, HUD_BOTTOM_MARGIN);
             set_client(&w, &a, HUD_W, HUD_H);
-            set_pos(&w, a.x + (a.w - ww) / 2.0, a.y + a.h - hh - units(&a, 24.0));
+            set_pos(&w, a.physical, x, y);
         }
         let _ = w.show();
     }
@@ -193,19 +176,20 @@ fn caret_in_space<R: Runtime>(app: &AppHandle<R>, r: voicekey_platform::Rect) ->
 
 fn place_pick<R: Runtime>(w: &WebviewWindow<R>, a: &Anchor) {
     let ar = &a.area;
-    let (pw, ph) = (units(ar, PICK_W), units(ar, a.height));
-    let gap = units(ar, 6.0);
+    let (pw, ph) = (ar.units(PICK_W), ar.units(a.height));
+    let gap = ar.units(6.0);
     let (x, y) = match a.caret {
         Some((cx, cy, _, chh)) => {
             let above = cy - ph - gap;
-            (cx - units(ar, 40.0), if above >= ar.y { above } else { cy + chh + gap })
+            (cx - ar.units(40.0), if above >= ar.y { above } else { cy + chh + gap })
         }
-        None => (ar.x + (ar.w - pw) / 2.0, ar.y + ar.h - ph - units(ar, 120.0)),
+        // 插入点（caret）未知（Wayland）时与胶囊一样落底部居中，只是离底更远
+        None => bottom_center(ar, PICK_W, a.height, PICK_BOTTOM_MARGIN),
     };
     let x = x.clamp(ar.x + gap, (ar.x + ar.w - pw - gap).max(ar.x));
     let y = y.clamp(ar.y + gap, (ar.y + ar.h - ph - gap).max(ar.y));
     set_client(w, ar, PICK_W, a.height);
-    set_pos(w, x, y);
+    set_pos(w, ar.physical, x, y);
 }
 
 pub fn pick_show<R: Runtime>(app: &AppHandle<R>, caret: Option<voicekey_platform::Rect>, rows: usize, focus: bool) {
