@@ -59,9 +59,16 @@
     </div>
   {:else}
     <h2>按住快捷键说一句</h2>
-    <div class="sub">点一下下面的输入框，按住 <b>{hold}</b> 说「你好 VoiceKey」，松开即上屏。</div>
-    <textarea class="try" placeholder="在这里试一试"></textarea>
-    {#if tap}<div class="tip">也可以点按 <b>{tap}</b>，停顿后自动结束</div>{/if}
+    {#if app.perms.injectBlocked}
+      <!-- 上屏前提不成立时别说"松开即上屏"：那正是这句说明要消灭的静默失败。
+           文案与设置窗口顶部那条同源（后端 inject::advice），这里只换一层框。 -->
+      <div class="sub warn">现在无法上屏</div>
+      <div class="alarm">{app.perms.injectBlocked}</div>
+    {:else}
+      <div class="sub">点一下下面的输入框，按住 <b>{hold}</b> 说「你好 VoiceKey」，松开即上屏。</div>
+      <textarea class="try" placeholder="在这里试一试"></textarea>
+      {#if tap}<div class="tip">也可以点按 <b>{tap}</b>，停顿后自动结束</div>{/if}
+    {/if}
   {/if}
   <div class="nav">
     <button class="btn" style:visibility={i ? "visible" : "hidden"} onclick={() => i--}>上一步</button>
@@ -79,6 +86,8 @@
   .hero :global(svg) { width: 52px; height: 52px; }
   h2 { font-size: 22px; font-weight: 650; }
   .sub { color: var(--fg2); max-width: 440px; margin: 6px auto 22px; }
+  .sub.warn { color: var(--err); margin-bottom: 8px; }
+  .alarm { max-width: 560px; margin: 0 auto 18px; background: color-mix(in srgb, var(--err) 12%, transparent); border: 1px solid color-mix(in srgb, var(--err) 35%, transparent); border-radius: var(--rs); padding: 10px 12px; font-size: 12.5px; text-align: left; -webkit-user-select: text; user-select: text; overflow-wrap: anywhere; }
   .left { text-align: left; width: 100%; }
   .big { width: 100%; height: 72px; border-radius: var(--r); background: var(--card); border: 1px solid var(--line); margin-bottom: 12px; padding: 4px 8px; }
   .try { width: 100%; height: 96px; resize: none; border: 1px solid var(--line); background: var(--card); border-radius: var(--rs); padding: 12px 14px; font-size: 14px; outline: none; -webkit-user-select: text; user-select: text; }

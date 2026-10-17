@@ -3,7 +3,7 @@ import { call, on, applyLook, type AppInfo, type Settings, type Perms, type Mode
 export const app = $state({
   info: null as AppInfo | null,
   s: null as Settings | null,
-  perms: { accessibility: true, mic: "granted" } as Perms,
+  perms: { accessibility: true, mic: "granted", injectBlocked: null } as Perms,
   level: 0,
   compare: null as Model | null,
   recording: false,

@@ -22,6 +22,11 @@ evdev = "0.13"
 name = "vk-kwin"
 path = "src/bin/vk-kwin.rs"
 
+[[bin]]
+# 上屏前提的自检：注入设备可不可写（仅 Linux；见 src/bin/vk-inject.rs）
+name = "vk-inject"
+path = "src/bin/vk-inject.rs"
+
 [target.'cfg(windows)'.dependencies]
 arboard = "3"
 windows = { version = "0.62", features = [

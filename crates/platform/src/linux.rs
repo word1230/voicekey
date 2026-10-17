@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// uinput 虚拟设备名；扫描输入设备时按此跳过，避免自读自写死循环
 const VIRT_NAME: &str = "voicekey-virtual";
@@ -161,9 +161,37 @@ fn char_for(code: u32) -> Option<char> {
 
 // MARK: - 注入（uinput）
 
-fn virt() -> Option<&'static Mutex<evdev::uinput::VirtualDevice>> {
-    static V: OnceLock<Option<Mutex<evdev::uinput::VirtualDevice>>> = OnceLock::new();
-    V.get_or_init(|| build_virt().ok().map(Mutex::new)).as_ref()
+/// 探一次注入设备可不可写，判定与文案见 [`crate::inject`]。
+///
+/// 只开一次文件：写入是上屏唯一的门槛，而打开 `/dev/uinput` 没有副作用——虚拟设备要等
+/// `UI_DEV_SETUP` 才创建（[`build_virt`] 干的事），这里只是问一句"让不让我写"。
+pub fn inject_device() -> crate::inject::Device {
+    use crate::inject::Device;
+    match std::fs::OpenOptions::new().write(true).open(crate::inject::DEVICE_PATH) {
+        Ok(_) => Device::Writable,
+        // 节点不在：uinput 没加载，跟权限不是一回事
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Device::Missing,
+        Err(_) => Device::NotWritable,
+    }
+}
+
+/// 虚拟键盘建好之后，合成器（KWin 里的 libinput）要过一小会儿才打开这个新出现的
+/// `/dev/input/eventN`；在那之前发出去的按键**没有读者，内核直接丢掉**，而 `emit`
+/// 照样返回 `Ok`——症状就是"第一次说话，字没上屏"。所以第一次发之前先把这段窗口等过去。
+///
+/// 实测（本机 KWin 6.8）：建好 0ms 就发 → 丢；80ms / 150ms / 250ms / 400ms 发 → 到。
+/// 取 250ms 是给负载高的场合留余量；只在第一次发的时候等，设备之后一直活着。
+const WARMUP: Duration = Duration::from_millis(250);
+
+/// 虚拟键盘，外加它是什么时候建起来的（[`WARMUP`] 要用）
+struct Virt {
+    dev: Mutex<evdev::uinput::VirtualDevice>,
+    born: Instant,
+}
+
+fn virt() -> Option<&'static Virt> {
+    static V: OnceLock<Option<Virt>> = OnceLock::new();
+    V.get_or_init(|| build_virt().ok().map(|dev| Virt { dev: Mutex::new(dev), born: Instant::now() })).as_ref()
 }
 
 fn build_virt() -> std::io::Result<evdev::uinput::VirtualDevice> {
@@ -192,10 +220,13 @@ fn keyev(k: KeyCode, down: bool) -> InputEvent {
 }
 
 fn emit(events: &[InputEvent]) {
-    if let Some(v) = virt() {
-        if let Ok(mut v) = v.lock() {
-            let _ = v.emit(events);
-        }
+    let Some(v) = virt() else { return };
+    // 预热窗口：设备刚建好时合成器还没打开它，这一下发出去会被丢掉（见 WARMUP）
+    if let Some(left) = WARMUP.checked_sub(v.born.elapsed()) {
+        thread::sleep(left);
+    }
+    if let Ok(mut dev) = v.dev.lock() {
+        let _ = dev.emit(events);
     }
 }
 

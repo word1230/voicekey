@@ -101,6 +101,11 @@ pub fn inject_key(code: u32, down: bool) {
     send(&[key_input(code as u16, 0, flags)]);
 }
 
+/// 上屏设备：Windows 走 SendInput，没有设备节点可写性这一关，恒为可写
+pub fn inject_device() -> crate::inject::Device {
+    crate::inject::Device::Writable
+}
+
 pub(crate) fn backspace(n: usize) {
     let inputs: Vec<INPUT> = (0..n)
         .flat_map(|_| [key_input(0x08, 0, KEYBD_EVENT_FLAGS(0)), key_input(0x08, 0, KEYEVENTF_KEYUP)])

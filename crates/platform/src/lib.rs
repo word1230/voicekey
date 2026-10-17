@@ -13,10 +13,22 @@ mod win;
 #[cfg(windows)]
 use win as imp;
 
-pub use imp::{caret, front_app, inject_key, paste, secure_input, start_hook, FrontApp};
+pub use imp::{caret, front_app, inject_device, inject_key, paste, secure_input, start_hook, FrontApp};
 
 /// 浮层几何：给定工作区与浮层尺寸算落点，应用与 KWin 规则生成共用
 pub mod overlay;
+
+/// 上屏前提：注入设备可不可写（判定与文案是纯函数；探测在各平台一份）
+pub mod inject;
+
+/// 上屏前提的结论：探一次注入设备，能上屏给 `None`，不能则给出原因
+/// （给用户看的话由 [`inject::advice`] 出）。
+///
+/// 每次调用都真去开一次设备，不缓存：设备权限是会话级的，用户装上 udev 规则后重新登录
+/// 就好，而已经跑着的应用下一次问就该答"能上屏"，不该举着一个开机时的旧结论。
+pub fn inject_problem() -> Option<inject::Problem> {
+    inject::problem(inject_device())
+}
 
 /// KWin 窗口规则：生成、安装、卸载（仅 Linux；macOS / Windows 由应用自己摆窗口）
 #[cfg(target_os = "linux")]

@@ -44,15 +44,20 @@
           </button>
         {/each}
         <div class="foot">
-          {#if app.perms.accessibility}
-            <span class="dot"></span><span>就绪 · 长按 <b>{hold}</b> 说话</span>
-          {:else}
+          {#if !app.perms.accessibility}
             <span class="dot bad"></span><span>需要辅助功能权限</span>
+          {:else if app.perms.injectBlocked}
+            <span class="dot bad"></span><span>现在无法上屏</span>
+          {:else}
+            <span class="dot"></span><span>就绪 · 长按 <b>{hold}</b> 说话</span>
           {/if}
         </div>
       </nav>
       <main>
         <div class="drag" data-tauri-drag-region></div>
+        {#if app.perms.injectBlocked}
+          <div class="alarm"><b>现在无法上屏</b><span>{app.perms.injectBlocked}</span></div>
+        {/if}
         {#if page === "recog"}<Recog />
         {:else if page === "keys"}<Keys />
         {:else if page === "audio"}<Audio />
@@ -82,6 +87,11 @@
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: none; }
   .dot.bad { background: var(--err); }
   main { flex: 1; overflow: auto; padding: 0 28px 28px; }
+  /* 上屏前提不成立（Linux 的 /dev/uinput 不可写）时顶在正文上：这话里的命令是给人照抄的，
+     所以这块文字可以选中复制，别处（body）是全局不可选的 */
+  .alarm { display: flex; gap: 8px; align-items: baseline; background: color-mix(in srgb, var(--err) 12%, transparent); border: 1px solid color-mix(in srgb, var(--err) 35%, transparent); border-radius: var(--rs); padding: 10px 12px; margin-bottom: 14px; font-size: 12.5px; -webkit-user-select: text; user-select: text; }
+  .alarm b { color: var(--err); flex: none; }
+  .alarm span { overflow-wrap: anywhere; }
   main :global(h2) { font-size: 20px; font-weight: 650; margin: 0 0 4px; }
   main :global(.sub) { color: var(--fg2); margin-bottom: 18px; }
   main :global(h3) { font-size: 12px; font-weight: 600; color: var(--fg2); margin: 20px 0 8px; letter-spacing: 0.02em; }

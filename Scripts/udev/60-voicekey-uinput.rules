@@ -1,0 +1,23 @@
+# VoiceKey：上屏（把识别结果写进前台应用）要经 /dev/uinput 这把虚拟键盘。
+#
+# 它默认是 root:root 0660，普通用户写不进去；而写不进去时上屏是**静默**的——说了话，
+# 字没上屏，也不报错。装上这条规则，上屏就不再依赖别的软件：此前蹭的是 Steam 的
+# /usr/lib/udev/rules.d/60-steam-input.rules，卸掉 Steam 那条就没了。
+#
+# TAG+="uaccess" 让 systemd-logind 给当前座席（seat）的登录用户挂一条 ACL，与用户属于
+# 哪个组无关——所以不必、也不要为此把用户加进 input 组：那是读全局按键用的（docs/linux.md）。
+#
+# **文件名开头的 60 不能改大**：udev 按文件名顺序处理规则，而真正把 uaccess 标签变成 ACL 的是
+# /usr/lib/udev/rules.d/73-seat-late.rules 里的 `RUN{builtin}+="uaccess"`。排到 73 之后
+# （比如 99-）这条规则加的标签就赶不上那一步：`udevadm info` 里 TAGS 明明有 uaccess，
+# ACL 却不会出现，上屏照样不行。Steam 那条能生效也正是因为它是 60-。
+#
+# 装法（装到 /etc 而不是 /usr/lib：这是本地管理员的规则，升级软件包不会覆盖）：
+#   sudo install -m 644 Scripts/udev/60-voicekey-uinput.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo modprobe -r uinput && sudo modprobe uinput
+#
+# 最后一步是让设备节点重新创建一次：logind 只在节点出现时算 ACL，对已有的节点
+# `udevadm trigger` 不会让它补上。不想卸载模块的话，重新登录也行。
+#
+# 装上没有、现在能不能上屏：跑 `vk-inject`（0 = 能上屏）。应用启动时自己也会报。
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess"

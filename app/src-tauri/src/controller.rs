@@ -637,7 +637,7 @@ impl Ctl {
                 }
                 if let Some(e) = error {
                     if !streamed && !text.is_empty() {
-                        pf::paste(&text);
+                        self.insert(&text);
                     }
                     ui::hud_error(&self.app, &format!("识别失败：{e}"));
                 } else if streamed {
@@ -647,7 +647,7 @@ impl Ctl {
                     ui::hud_hide(&self.app, 1000);
                 } else {
                     ui::hud_hide(&self.app, 0);
-                    pf::paste(&text);
+                    self.insert(&text);
                 }
             }
             Mode::Pick | Mode::Compare => {
@@ -839,13 +839,22 @@ impl Ctl {
         }
         let front = self.front.take();
         self.cancel();
+        let app = self.app.clone();
         tauri::async_runtime::spawn(async move {
             if let Some(f) = front {
                 f.activate();
             }
             tokio::time::sleep(Duration::from_millis(80)).await;
-            pf::paste(&text);
+            insert(&app, &text);
         });
+    }
+
+    /// 上屏，且不让它静默失败：设备不可写时把原因顶到浮层上，而不是说完话什么都没发生。
+    ///
+    /// 启动时的预检（`main.rs`）与设置窗口那条提示管的是"开机时"；这条管的是"每一次说话"——
+    /// 用户可能在应用跑着的时候把设备权限弄没了，或者压根没看设置窗口。
+    fn insert(&self, text: &str) {
+        insert(&self.app, text);
     }
 
     /// 最多每 33ms 推送一次，避免文字跳动
@@ -872,6 +881,14 @@ impl Ctl {
                 let _ = self.app.emit_to("main", "compare", model);
             }
         }
+    }
+}
+
+/// 上屏（把识别结果写进前台应用）。设备不可写时**说出来**：静默失败正是这一版要消灭的东西。
+fn insert(app: &tauri::AppHandle, text: &str) {
+    match pf::inject_problem() {
+        None => pf::paste(text),
+        Some(p) => ui::hud_error(app, &format!("现在无法上屏 —— {}", voicekey_platform::inject::advice(p))),
     }
 }
 

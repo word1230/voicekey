@@ -18,7 +18,7 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, Runtime, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use voicekey_core::QwenEngine;
-use voicekey_platform::{self as pf, perm, MicStatus};
+use voicekey_platform::{self as pf, inject, perm, MicStatus};
 
 pub struct AppState {
     pub settings: Arc<RwLock<Settings>>,
@@ -102,7 +102,11 @@ fn perms() -> serde_json::Value {
         MicStatus::Denied => "denied",
         MicStatus::Undetermined => "undetermined",
     };
-    json!({ "accessibility": perm::accessibility(false), "mic": mic })
+    // 上屏前提（Linux 的 /dev/uinput 可不可写）：不可用时把原因与修法一并交给界面，
+    // 而不是让它变成"说了话字没上屏"这种没有痕迹的失败。每次问都真去探一次，
+    // 用户装上 udev 规则后重新登录，界面下一轮刷新就该变成可用。
+    let inject_blocked = pf::inject_problem().map(inject::advice);
+    json!({ "accessibility": perm::accessibility(false), "mic": mic, "injectBlocked": inject_blocked })
 }
 
 #[tauri::command]
@@ -268,7 +272,10 @@ fn main() {
             ui::create_overlays(&handle)?;
             ui::build_tray(&handle, &settings)?;
             apply(&handle, &settings);
-            if first_run || !perm::accessibility(false) {
+            // 该让用户看见的时候把设置窗口开出来：首次运行、缺权限，以及上屏前提不成立
+            // —— 最后这条在 Linux 上是「/dev/uinput 不可写」，不主动开窗的话用户看到的
+            // 只是"说了话没反应"，原因与修法都藏在窗口里没人翻
+            if first_run || !perm::accessibility(false) || pf::inject_problem().is_some() {
                 ui::show_settings(&handle);
             }
             update::schedule(&handle);

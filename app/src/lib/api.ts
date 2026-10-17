@@ -14,7 +14,16 @@ export interface Settings {
   liveText: boolean; mic: string; multi: Channel[]; lastPick: Channel | null; autostart: boolean; theme: string; onboarded: boolean;
 }
 export interface OfflineStatus { state: "missing" | "downloading" | "ready" | "failed"; progress?: number; error?: string }
-export interface Perms { accessibility: boolean; mic: "granted" | "denied" | "undetermined" }
+export interface Perms {
+  accessibility: boolean;
+  mic: "granted" | "denied" | "undetermined";
+  /**
+   * 上屏前提（Linux 的 /dev/uinput 可不可写）。能上屏时是 null；不能时给出原因与修法，
+   * 界面原样展示。名字写 injectBlocked 而不是 inject：这个字段**有值就是被挡住了**，
+   * 不是"注入相关的什么信息"。
+   */
+  injectBlocked: string | null;
+}
 export interface UpdateStatus { state: "idle" | "checking" | "latest" | "available" | "downloading" | "error"; version?: string; progress?: number; error?: string }
 export interface AppInfo {
   settings: Settings; platform: "mac" | "win" | "linux"; arch: string; version: string;

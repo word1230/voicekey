@@ -196,6 +196,12 @@ pub(crate) fn type_text(text: &str) {
 /// Windows 用于重放被吞掉的修饰键；macOS 不吞修饰键，无需重放
 pub fn inject_key(_code: u32, _down: bool) {}
 
+/// 上屏设备：macOS 走 CGEvent，没有设备节点可写性这一关（缺的是辅助功能授权，
+/// 那由 `perm::accessibility` 报），所以恒为可写
+pub fn inject_device() -> crate::inject::Device {
+    crate::inject::Device::Writable
+}
+
 /// 借剪贴板 + ⌘V 上屏，随后恢复原剪贴板（保留所有类型）
 pub fn paste(text: &str) {
     use objc2::runtime::ProtocolObject;

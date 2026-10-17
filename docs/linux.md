@@ -4,12 +4,7 @@
 
 ## 跑起来
 
-权限（一次性，两者缺一不可）：
-
-- 读全局按键：能读 `/dev/input/event*` —— 用户加入 `input` 组
-- 注入上屏：`/dev/uinput` 可写 —— 自建 udev 规则把用户加入可写名单（`input` 组不含它）
-
-构建：
+先备齐两项系统权限（见下节「[权限](#权限)」），再构建：
 
 ```bash
 cd app
@@ -21,6 +16,82 @@ npx tauri build --bundles appimage,deb    # 打包
 完成判据：打包产物出现在 `target/release/bundle/{appimage,deb}/`。
 
 **Gotcha — npm**：全局设了 `allow-remote = none` 时（本机如此），而 lockfile 指向 `registry.npmmirror.com`，`npm ci` 报 `EALLOWREMOTE`。用 `--allow-remote=all` 覆盖。
+
+## 权限
+
+两项，各管一件事，互相独立：
+
+| 要做什么 | 需要什么 | 怎么给 |
+|---|---|---|
+| 读全局按键（长按 / 点按说话键） | 能读 `/dev/input/event*` | 用户加入 `input` 组（本机已如此，保持现状） |
+| 上屏（把字写进前台应用） | `/dev/uinput` 可写 | 装仓库自带的 udev 规则，见下 |
+
+**`input` 组不含 `/dev/uinput`**（它是 `misc` 子系统的 `root:root 0660`），所以加组只解决读按键、
+不解决写入。`/dev/uinput` 不可写时上屏是**静默失败**：按住说话键、说话、松开，什么都不会发生，
+也没有任何报错——两项权限缺哪一项，症状都是"说了话，字没上屏"。
+
+### 上屏：/dev/uinput 与仓库自带的 udev 规则
+
+```bash
+sudo install -m 644 Scripts/udev/60-voicekey-uinput.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo modprobe -r uinput && sudo modprobe uinput
+```
+
+规则只有一行（文件里的注释写了理由）：
+
+```
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess"
+```
+
+`TAG+="uaccess"` 让 systemd-logind 给**当前座席（seat）的登录用户**挂一条 ACL——`getfacl
+/dev/uinput` 里那条 `user:你:rw-` 就是它，与用户属于哪个组无关。所以**不要**为了上屏把用户加进
+`input` 组。装到 `/etc/udev/rules.d/` 而不是 `/usr/lib/udev/rules.d/`：前者是本地管理员的规则，
+升级软件包不会覆盖。
+
+**文件名开头的 `60` 不能改大。** udev 按文件名顺序处理规则，而真正把 `uaccess` 标签变成 ACL 的是
+系统自带的 `73-seat-late.rules` 里那句 `RUN{builtin}+="uaccess"`。排到 73 之后（比如 `99-`）标签
+加得太晚：`udevadm info --name=/dev/uinput` 里 `TAGS=:uaccess:` 明明有，ACL 却不会出现，上屏照样
+不行。**这条是踩出来的**——第一版叫 `99-voicekey-uinput.rules`，装上后 `vk-inject` 一直报不可写。
+Steam 那条能生效，也正是因为它是 `60-`。
+
+**装完要让设备节点重新创建一次**（`modprobe -r` 再 `modprobe`）：logind 只在节点出现时算 ACL，
+对**已经存在**的节点跑 `udevadm trigger --name-match=/dev/uinput` 不会让它补上（实测 ACL 原样）。
+不想卸模块的话，重新登录也等价。
+
+**为什么不用 Steam 那条**：本机此前能写 `/dev/uinput`，靠的是 Steam 装的
+`/usr/lib/udev/rules.d/60-steam-input.rules`（内容是同一句 `TAG+="uaccess"`）。那跟 VoiceKey
+毫无关系，卸掉 Steam 就没了。仓库自带这条之后，上屏不再依赖别的软件；两条都在也不冲突（同一个
+tag 加两遍，文件名相同前缀，谁先谁后都生效）。
+
+两种失败，修法不同：
+
+| `/dev/uinput` | 说明什么 | 修法 |
+|---|---|---|
+| 可写 | —— | 无 |
+| 不可写 | 权限没给到这个用户 | 装上面那条 udev 规则，然后让节点重建（`modprobe -r`/`modprobe`）或重新登录 |
+| 不存在 | uinput 没加载 | `sudo modprobe uinput`；让它开机加载：`echo uinput \| sudo tee /etc/modules-load.d/uinput.conf` |
+
+**怎么看现在是哪种**：`vk-inject`——退出码 0 就是能上屏，非 0 把原因与修法打出来（写进脚本、
+写进验收清单都方便）。`vk-inject paste <文字>` 真走一次上屏链路（剪贴板 + uinput 的 Ctrl+V，
+与说完话后那一下同一条路），所以**不必真说话**就能验上屏这一段。应用启动时也自己查一遍
+（`perms.injectBlocked`）：不成立就把设置窗口开出来，顶部顶一条「现在无法上屏」+ 修法，侧栏那行从
+「就绪 · 长按 X 说话」变成「现在无法上屏」——**特意查在启动时**，因为这种失败本身不给任何
+提示，不主动说就等于没说。
+
+`vk-inject paste` 打进去的字要落进**当前有键盘焦点的窗口**：先点一下目标输入框再跑。它和真应用
+一样把文字先写进剪贴板再发 Ctrl+V——所以剪贴板里原来的东西会被覆盖（Linux 上不恢复，见
+`linux.rs::paste`）。验证时用一个一次性的 GTK 窗口 + `Gtk.Entry` 当靶子，别拿自己正在用的编辑器。
+
+### 虚拟键盘建好后要等一小会儿才发键
+
+`uinput` 设备建起来到合成器打开它的事件节点之间有一小段：这段时间里发出去的按键**没有读者、
+内核直接丢掉**，而 `evdev` 的 `emit` 照样返回 `Ok`。应用把设备建在第一次上屏的那一刻，所以
+**第一次说话**就会踩上——症状仍是"字没上屏"，只是只发生在每个进程的头一次。
+
+实测（本机 KWin 6.8，用剪贴板 + Ctrl+V 量，判据是靶子窗口里有没有出现那段文字）：建好
+**0ms** 就发 → 丢；**80 / 150 / 250 / 400ms** 发 → 到。`linux.rs` 的 `emit` 因此在设备出生后
+的 250ms 内先等一下再发（只在头一次发的时候等）。量的时候别用裸字母当探针：fcitx5 会把它们
+吃进拼音预编辑，看着像"没到"（实测还顺手提交了一个"下"字）。
 
 ## 平台层
 
@@ -230,7 +301,18 @@ voicekey                     hud          620,936    680x120  active=false wants
 ## 本机验收手法
 
 本机（KWin Wayland）**没有** `xdotool` / `kdotool`，客户端也拿不到窗口几何；niri 那套
-（`niri msg windows`、`grim`）在此一律无效。可用的是下面四件。
+（`niri msg windows`、`grim`）在此一律无效。可用的是下面四件；另有一条前端缓存坑，先看它再判"界面怎么没变"。
+
+### 界面改了没生效 — WebKit 缓存
+
+`target/debug/voicekey` 里的 webview 从 `:1420` 取页面，而 WebKitGTK 有自己的磁盘缓存
+（`~/.local/share/do.j3.voicekey/WebKitCache`）。改了 `app/src`、重新 `npm run build` 之后，
+**已跑着的旧进程或新起的进程都可能还渲染旧 bundle**，症状是"改的界面没出现"，Rust 那半却明明
+生效了（实测：启动时因 `perms.injectBlocked` 把设置窗口弹出来了，窗口里却没有那条提示）。
+
+判据：在 `app/dist` 的 JS 里塞一个显眼标记，重启应用看它出不出现；不出现就是缓存。清法是把这个
+应用自己的 `WebKitCache` 目录挪走（或删掉）再起——它与 `~/.local/share/VoiceKey/` 下的设置、
+凭据无关，**别把两个目录搞混**（前者是 webview 的，后者是用户的）。
 
 ### 窗口信息 — KWin 脚本
 
@@ -468,6 +550,44 @@ XDG_DATA_HOME=/tmp/vksb ./target/debug/voicekey   # dirs::data_dir() 认这个�
 - 收尾三件套：`cargo check --workspace --all-targets` 无警告、`cargo test --workspace` 全绿、
   `app` 里 `npm run check` 101 文件 0 错 0 警、`npm test` 3 项通过。`Cargo.lock` 只多一条
   `gtk` 依赖边（`voicekey` 包下），版本树没动——`gtk 0.18` 本来就在 tao / wry 的依赖里
+- **上屏前提（#6）**：`crates/platform` 32 项单测里新增 4 项（`inject` 的谓词、两种原因的文案、
+  规则路径常量）。实测按"先把它弄坏、再看它报得对不对"的顺序走：
+  - 不可写的造法：Steam 的规则先改名挪开（`60-steam-input.rules` → `.vk-off`），再
+    `sudo setfacl -b /dev/uinput` 把 Steam 此前挂上的 ACL 摘掉——这样 `/dev/uinput` 就是
+    `root:root 0660`、**没有任何规则给它权限**，与"卸掉 Steam"等价。`vk-inject` 随即报
+    `/dev/uinput：不可写`、退出码 1，并打出装规则的命令
+  - 同一状态下起真应用：设置窗口**自己弹出来**（`perms.injectBlocked` 有值 → `show_settings`），
+    顶部一条「现在无法上屏 /dev/uinput 不可写。装仓库自带的 udev 规则，然后让设备节点重建
+    一次（或重新登录）：sudo install -m 644 …」+ 侧栏那行从「就绪 · 长按右 Alt 说话」变成
+    「现在无法上屏」。截图对照过（上面那句文案之后又补上了重建节点那半条命令，补的是同一个
+    修法，没再截图）
+  - 说完话那条路也不再静默：`controller.rs` 的上屏统一走 `insert()`，设备不可写时把同一条
+    文案顶到 HUD 上（`hud_error`）而不是什么都不发生。启动预检管"开机时"，这条管"每一次
+    说话"。首次运行走的是 onboarding（Linux 步骤是「麦克风 → 试一句」），那里也接了同一个
+    字段：不成立时不再写「松开即上屏」，换成同一条说明。**这两处只做了类型检查与代码审读，
+    没有在真机上截图复验**（`vk-inject` / 设置窗口那两处是实测过的）
+  - 装上 `60-voicekey-uinput.rules`、Steam 那条仍是 `.vk-off`、`modprobe -r`/`modprobe` 重建
+    节点之后：`getfacl` 里 `user:cheems:rw-` 回来了，`udevadm test` 只读到我们这一条（加上
+    `60-steam-vr.rules`，它与 uinput 无关）；`vk-inject` 退出码 0；**冷进程** `vk-inject paste
+    不依赖 Steam 也能上屏` 落进了靶子窗口（GTK `Entry`）。恢复 Steam 那条后
+    `sha256sum` 与动手前一致（`284930f8…`），我们那条留在 `/etc/udev/rules.d/`
+  - 规则名踩了一脚：第一版是 `99-voicekey-uinput.rules`，`udevadm info` 里 `TAGS=:uaccess:`
+    有、ACL 却没有——`73-seat-late.rules` 里的 `uaccess` builtin 排在 99 之前。改成 `60-`
+    才生效（见权限小节）
+  - 顺手量出一个既有的静默失败：`uinput` 设备建好后立刻发的按键会被丢掉（0ms 丢，80ms 起
+    才到；判据是剪贴板 + Ctrl+V 打进靶子窗口的文字）。应用是第一次上屏时才建设备，所以每个
+    进程的**头一次上屏**都会踩到——`linux.rs` 因此加了 250ms 预热，改完用冷进程复验，第一次
+    就落进去了
+  - 界面上第一次没看到那条提示：Rust 侧明明把窗口弹出来了，页面却是旧的——WebKitGTK 的磁盘
+    缓存（`~/.local/share/do.j3.voicekey/WebKitCache`）顶着旧 bundle。挪走缓存后同一次构建就
+    正常显示（验证手法见「本机验收手法」）
+  - 全程 `sha256sum ~/.local/share/VoiceKey/settings.json` 未变（`d9c9e0ef…`）
+  - 跨平台编译回归（改到了 `mac.rs` / `win.rs`）：
+    `cargo check -p voicekey-platform --target x86_64-apple-darwin` 与
+    `--target x86_64-pc-windows-msvc` 均通过（`--all-targets` 也算上，`vk-inject` 在非 Linux 上
+    是那条报错入口，跟着编过）。app 侧的改动（`main.rs` 一行 `inject_problem()`）按
+    「[mac / Windows 编译回归在本机能验到哪](#mac--windows-编译回归在本机能验到哪)」的说明，
+    本机只能给论证：与旧 `cfg!` 同型、类型中立
 
 ### Arch + niri（历史，[ADR 0001](adr/0001-linux-targets-kwin-wayland.md) 之后不再代表当前环境）
 
