@@ -14,6 +14,18 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 
 Infer the repo from `git remote -v` (`word1230/voicekey`); `gh` does this automatically when run inside a clone.
 
+## Writing specs
+
+An acceptance criterion that names a **boundary** states the expected behaviour *at* that boundary,
+not merely that it is covered. "Cover the work area being offset / a non-1 scale factor / the overlay
+being wider than the work area" leaves the implementer guessing between clamping and centre-and-
+overflow; "wider than the work area → still centres, overflowing both sides" is checkable, and it
+ends the guess.
+
+Same for anything a criterion only gestures at: give the expected value, or the rule that produces
+it ("1920×1080 → (620, 936)"). A criterion the implementer has to interpret is one they can satisfy
+the wrong way and still call done.
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_

@@ -140,13 +140,30 @@ gdbus call -e -d $BUS -o /org/ayatana/NotificationItem/tray_icon_tray_app_main/M
 
 `grim` 在 KWin 上不出图，用 `spectacle -b -n -f -o /tmp/x.png`，再 `magick` 裁剪 / 缩放。
 
-### 判定时的三个坑
+### mac / Windows 编译回归在本机能验到哪
+
+每条 KDE ticket 都带一条「macOS / Windows 仍能编译」，本机（Linux）能给出的证据只有一半：
+
+- **能**：`cargo check -p voicekey-platform --target x86_64-apple-darwin` 与 `--target
+  x86_64-pc-windows-msvc` 都跑通（各 10–20s）。所以改 `crates/platform` 时，可以机器确认
+  「没把 mac/win 编坏」。
+- **不能**：整包 `cargo check -p voicekey --target …`。它挂在**依赖的 build script** 上，与改动
+  无关——Windows 侧 `ring` 要 MSVC 的 `lib.exe`，macOS 侧 `objc2-exception-helper` 要 Apple SDK
+  的 clang。改动落在 `ui.rs` 这类 app 侧时，能给的只有一条论证：改的是与旧 `cfg!` 同型、类型中立
+  的分支。最终结论留给 `release.yml`——它的 matrix 才是真跑 mac/win 的地方。
+
+缺的是原生 SDK，所以本机不必装交叉工具链，装也不解决 app 侧那个 build script。
+
+### 判定时的四个坑
 
 - **先看文本再截图**：窗口 dump、`GetLayout`、journal 能回答的先问它们；确认有东西可看
   才落截图，贴图很贵。
 - **窗口刚打开就 dump / 截图会扑空**：先 `sleep 3` 或重采一次。
 - **`settings.json` 的 mtime 不是「设置被改过」的证据**：任何一次保存都重写文件，哪怕值
   逐字节不变。要比内容，就 `sha256sum` / `diff`（成因见 #6）。
+- **把 cargo 的输出管进 `tail` / `grep` 会吃掉退出码**：`cargo check … | tail` 失败时也返回 0，
+  后台任务里就显示成 `exited with code 0`。认输出里的 `Finished` / `error` 字样，或用
+  `set -o pipefail`。
 
 ## 渠道
 
