@@ -298,10 +298,69 @@ voicekey                     hud          620,936    680x120  active=false wants
 ——HUD 窗口照旧是 `680×120` 的整块，不用跟着内容改尺寸，胶囊两侧的留白也保持不变。这条结论
 只对本机这套 KWin 6.8 / Wayland 成立；换合成器或换 tao 版本，先按验证记录那套手法重测一遍。
 
+## 端到端验收：说话 → 识别 → 落进输入框
+
+这是本项目的完成标准本身：按住热键说一句中文，松开后文字落进**当前聚焦的输入框**。
+下面按顺序做，每步都写了"该看到什么"；哪一步对不上就停在那一行，看「对不上时」那一列。
+
+### 前置（一次）
+
+| 项 | 怎么确认 |
+|---|---|
+| 能读按键 | 用户属于 `input` 组（见「[权限](#权限)」） |
+| 能上屏 | `vk-inject` 退出码 0；非 0 时它把原因与修法打出来 |
+| 浮层规则已装、应用在装完之后重启过 | `vk-kwin check` 全 ok。注意它只在**浮层已映射**时才验行为层；浮层没开时那几条记 skip，这时它只证明规则文件对了，**证明不了应用重启过**。映射之后再跑一次，或直接看 `vk-kwin dump`：浮层那行该有 `keepAbove=true noBorder=true skipTaskbar=true layer=3`，只有 `acceptfocus=false` 生效、其余还是默认值，就是没重启（见「[装了之后](#装了之后)」） |
+| 前端在渲染 | `npx tauri dev`，或 `python3 -m http.server 1420 -d app/dist` 后跑 `target/debug/voicekey` |
+| 靶子 | 一个**一次性的**输入框，别拿正在用的编辑器——上屏会覆盖剪贴板且不恢复（`linux.rs::paste`）。没有现成的就用「[端到端替身](#端到端替身没有麦克风时)」里那扇 GTK 窗口。真人对着麦克风跑时，那一节的虚拟声卡换成你的真麦克风（`mic` 留空即用系统默认输入），uinput 注入换成你的真键盘，**沙箱照旧**（见该节第 4 件） |
+| 输入法 | fcitx5 照常开着即可，结论见「[fcitx5 与 Ctrl+V](#fcitx5-与-ctrlv)」 |
+
+### 对照清单
+
+| # | 做什么 | 该看到什么 | 对不上时 |
+|---|---|---|---|
+| 1 | 点一下靶子的输入框，插入点停在里面 | `vk-kwin dump` 里靶子那行 `active=true wantsInput=true` | 焦点不在靶子上：直接点输入框；别去 `activate` 浮层，那会把它抬到上面 |
+| 2 | 按住热键（默认右 Alt）不放 | 约 **0.3 秒**后（长按阈值）胶囊出现在**屏幕底部居中**（1920×1080 → `620,936 680×120`），波形开始动；`dump` 里 `voicekey hud … active=false wantsInput=false`，靶子仍是 `active=true` | 胶囊没出来：`pkill -x voicekey` 重启应用再试（钩子每 2 秒扫一次 `/dev/input`，且同名设备一个进程只认领一次）；位置 / 装饰 / 置顶不对：重跑 `vk-kwin install` 再重启应用 |
+| 3 | 按住不放，说一句中文 | 胶囊里逐字出现识别中的文字（「胶囊显示实时文字」开着时，默认开；4.6 秒的音频播到一半时，胶囊里已经能看到前几个字）；输入法**不弹候选框**——热键是修饰键，不会被当成拼音 | 一直没有文字：识别没通，看第 6 步 |
+| 4 | 松开热键 | 胶囊先切到"识别中"，约 1.2 秒后消失；文字随后落进靶子的输入框——**松手到落字 1.4–1.8 秒**（微信渠道实测 1.46–1.77；别的渠道会不同，见验证记录里那张表） | 文字没进输入框：`wl-paste` 看剪贴板——**有字** = 识别成功、上屏失败（跑 `vk-inject` 查权限；输入法有预编辑时也会这样，见下节）；**没变** = 识别没回来（第 6 步） |
+| 5 | 核对落点 | 文字在**靶子的输入框**里，不在胶囊里；`dump` 里靶子仍是活动窗口 | 字进了浮层：规则没生效，看 `vk-kwin check` 里 `acceptfocus` 那几条 |
+| 6 | （单独验识别链路）`XDG_DATA_HOME=/tmp/vksb7 ./target/debug/vk-test wetype ios/Resources/sample.wav`（沙箱目录随便给，`vk-test` 也会在里面建渠道身份） | `FINAL: 今天天气不错，我们下午一起去公园散步吧。 (5.97s)`——括号里是含 4.6 秒实时喂音频在内的总耗时 | 报错就是网络 / 渠道问题，与应用无关；六个云端渠道本机都通，耗时见验证记录 |
+| 7 | **由人**对着麦克风真读一句 | 同第 3–5 步，落进输入框的文字与所说一致 | —— |
+
+第 7 步是 issue 里那句"最后一句由人来读"：1–6 步可以用录制音频替身跑（见「[端到端替身](#端到端替身没有麦克风时)」），
+"真人对着麦克风说一句中文"只能由人完成，替身跑通不等于这一步做过。
+
+第 1–5 步的靶子用**普通应用的输入框**最有说服力（#7 额外在 Kate 里验过一次，见验证记录）；
+「端到端替身」那扇 GTK 窗口只是把"该看到什么"变成可 grep 的日志，两者不冲突。
+
+### fcitx5 与 Ctrl+V
+
+**结论：没有预编辑时互不干扰；有预编辑时那一下 Ctrl+V 会被 fcitx5 吃掉。**
+
+| 输入法状态 | 上屏 | 判据 |
+|---|---|---|
+| 未激活（`fcitx5-remote -c`；或 `-t` 从中文态切过去，此时 `-n` 报 `keyboard-us`），`state=1` | 到 | 靶子 `Entry` 收到 `Ctrl+V`，文字落进去 |
+| 激活、中文态但没有预编辑（`fcitx5-remote -o`，`state=2`） | 到 | 同上；上屏后输入法状态不变（仍是 `state=2`） |
+| **有预编辑**（敲了拼音、还没选字，输入法的候选窗开着） | **不到** | 靶子只收到 `Ctrl` 的 key-press，`V` 根本没到（fcitx5 拦了）；剪贴板**已经**被换成识别结果，预编辑原样留着，输入框里一个字都不多 |
+
+`-c` 是"停用输入法"、`-t` 是"在启用/停用之间切换"（`fcitx5-remote -h`），两者最后都停在 `state=1`，
+上屏都正常。第三行才是分水岭；它拦的是 Ctrl+V 这个按键本身，与识别结果来自哪个渠道无关
+（预编辑那一轮用的是沙箱里配置的微信渠道）。
+
+有预编辑时怎么自救（按实测顺序）：
+
+- 按 **Esc** 取消预编辑，再上屏 / 粘贴一次 → 到。
+- 点一下 Shift（fcitx5 的 `AltTriggerKeys`）会切到英文并**提交第一个候选**，剩下的字母原样留在输入框里
+  （实测留下 `你哈onihao`）——不算干净的解法。
+- **Shift+Insert** 在预编辑期间照样能粘贴（fcitx5 不拦它），但应用走的是 Ctrl+V，这条只作诊断用。
+
+热键本身**不会**清掉预编辑：右 Alt 是纯修饰键，fcitx5 不拿它当输入，按住说话、识别都照常，只有最后那一下
+Ctrl+V 落空。所以这种"说了话没上屏"**不是识别坏了**——`wl-paste` 里有字就是证据。本轮没有改代码（issue 只要求
+观察并记录）：修法（上屏前先发 Esc、或改用 Shift+Insert）会改变所有输入法下的行为，记在这里作为后续候选。
+
 ## 本机验收手法
 
 本机（KWin Wayland）**没有** `xdotool` / `kdotool`，客户端也拿不到窗口几何；niri 那套
-（`niri msg windows`、`grim`）在此一律无效。可用的是下面四件；另有一条前端缓存坑，先看它再判"界面怎么没变"。
+（`niri msg windows`、`grim`）在此一律无效。可用的是下面这些；另有一条前端缓存坑，先看它再判"界面怎么没变"。
 
 ### 界面改了没生效 — WebKit 缓存
 
@@ -380,6 +439,80 @@ KEY_ENTER」判断是不是键盘）。建设备后等 3 秒——应用的钩�
 `sleep 4` 让钩子扫到设备 → 注入并**长按住**（≥30s，留出截图与 `check` 的时间）→
 `vk-kwin check` / `dump` / 截图。
 
+### 端到端替身（没有麦克风时）
+
+验「说话 → 识别 → 落进输入框」不必真开口：让应用**从虚拟麦克风**录一段现成的语音，
+其余（热键、识别、上屏）全走真链路。仓库里有 `ios/Resources/sample.wav`（16kHz 单声道，
+内容是"今天天气不错，我们下午一起去公园散步吧。"），拿它当"说的话"。
+
+三件东西，缺一不可（沙箱是第四件，建议一起用）：
+
+1. **虚拟麦克风**：null sink + remap source，把播进 sink 的声音变成一路输入源。
+   ```bash
+   pactl load-module module-null-sink sink_name=vk7_sink sink_properties=device.description=vk7_sink
+   pactl load-module module-remap-source master=vk7_sink.monitor source_name=vk7_src
+   pactl set-default-source vk7_src          # 应用 mic 留空时用系统默认输入
+   paplay --device=vk7_sink ios/Resources/sample.wav
+   ```
+   验完 `pactl set-default-source <原来那个>`（`pactl get-default-source` 先记下来）。
+   **别去改用户的 `settings.json` 里的 `mic`**——用默认输入切换就够了。
+2. **靶子**：`Scripts/e2e/target.py`——一扇 GTK 窗口 + `Gtk.Entry`，把发生的事逐行写进日志。
+   判据是日志里的 `CHANGED len=20 text='…'`，不是截图。`python3 Scripts/e2e/target.py <日志>`
+3. **热键**：`Scripts/e2e/inject_hold.py`——上一节那把 uinput 键盘的成品，按住右 Alt 直到 stop
+   文件出现。它自己会先 `sleep 3` 再按下（原因见下面第 4 条坑）。`python3
+   Scripts/e2e/inject_hold.py <stop 文件>`
+4. **沙箱（建议）**：`XDG_DATA_HOME=<沙箱>`，里面放一份**单渠道**的 settings：
+   ```bash
+   mkdir -p /tmp/vk-e2e-sandbox/VoiceKey
+   printf '{"channel":"wetype","onboarded":true}' > /tmp/vk-e2e-sandbox/VoiceKey/settings.json
+   ```
+   `channel` 按你要验的渠道填（下面耗时表里的数字是 `wetype` 的）。**别照抄
+   「[不碰用户设置](#不碰用户设置把-pick-面板弄出来)」那节的 `channel=all`**——那是为了把 pick 面板弄出来，
+   而 `all` 模式按住热键出来的是 `pick` 浮层、松开后还要选一行才上屏，跟本清单第 2–5 步要的
+   `hud` 不是一回事。不设沙箱的话应用读写的就是你真实的 `~/.local/share/VoiceKey/`
+   （渠道身份、`settings.json` 全在里面），一次误操作就落到用户数据上了。用后删掉沙箱目录即可。
+
+一轮的编排已经写成脚本：`Scripts/e2e/run_e2e.sh [渠道] [工作目录]`，做的是下面这串（**每轮重启
+应用**，原因见「[合成按键](#合成按键--uinput-注入)」第 2 条坑）：
+
+```
+pkill -x voicekey → 起靶子 → 起应用（XDG_DATA_HOME=沙箱）→ sleep 5（让钩子扫到设备）
+→ 起注入脚本（它自己 sleep 3 再按下右 Alt：等钩子认领新设备）
+→ paplay 那段 wav → 等它播完 + 1 秒 → 让注入脚本松开右 Alt → sleep 10
+→ 看靶子日志，算"按住多久 / 松手到落字"
+```
+
+那个 `sleep 3` 在**按下之前**，不在按下与播放之间——它等的是"钩子扫到刚建的 uinput 设备"
+（见下面第 4 条坑）。所以实测的按住时长就是 `4.6s（wav）+ 1s ≈ 5.7s`，而不是 3+4.6+1。
+
+四个坑，都是本轮踩过的（后三条与「[合成按键](#合成按键--uinput-注入)」那节是同一件事，
+写在这里是因为端到端每轮都会碰到）：
+
+- **靶子窗口必须拿到焦点**，否则上屏落到别处。点它，或用 KWin 脚本
+  `workspace.activeWindow = <窗口>`；用 KWin 脚本激活后要确认 `dump` 里它 `active=true`。
+- **每轮重启应用**：同一个进程里同名 uinput 设备只被认领一次；上一轮注入的设备还在、
+  下一轮换了名字也不一定来得及被扫到——`sleep 3` 只是经验值，最稳的是重启。
+- **`pkill -f 'e2e/target.py'` 会匹配到你自己那条 `bash -c`**，和 `pkill -f <应用路径>` 是同一个坑：
+  模式里加个方括号（`'target[.]py'`）或改用 `pkill -x`。
+- **注入设备建好后至少等 2 秒再发键**：应用的钩子每 2 秒扫一次 `/dev/input`，设备晚被扫到，
+  按下去的右 Alt 就没人收（症状是"应用毫无反应"）。`sleep 3` 是留了余量的经验值。
+
+时间戳怎么算：注入脚本里"松开右 Alt"的时刻是松手，靶子日志里 `CHANGED` 的时刻是"字落进输入框"，
+两者之差就是**松手后的识别 + 上屏耗时**（应用在松手后才收尾上传、等定稿、再粘贴）。替身里松开发生在
+音频播完之后 1 秒，所以这个差值不含录音时长；验证记录里那 1.46–1.77 秒就是这么来的。
+
+### KWin 脚本里没有定时器
+
+`timeout` / `setTimeout` / `setInterval` 在 KWin 的 JS 引擎里**都不存在**（试过，报
+`timeout is not defined`），所以轮询式的观察脚本写不了。要带时间戳的事件流，就挂信号：
+`workspace.windowAdded` / `windowRemoved` / `windowActivated`，每个回调里 `print("VKEV|" + Date.now() + …)`，
+输出同样进合成器的 journal。拿 `journalctl --user -u plasma-kwin_wayland --since "-30s" | grep VKEV`
+捞回来即可。这条用来量"胶囊什么时候映射 / 什么时候消失"最准。
+
+顺带一条：`workspace.windowList()` 里同一个 GTK 应用会列出**好几扇窗口**（`target.py` 那扇实测出现
+四行，几何各不相同，只有第一行是真窗口）。按标题找窗口时别用 `windowList()[0]` 这类下标，
+要逐行比对标题 + `active`。
+
 ### 合成鼠标 — 判点击落在谁身上
 
 验"这一下点击被谁吃了"要两样东西：一把 uinput 相对指针，和一个会自己举手的窗口。
@@ -411,10 +544,15 @@ mkdir -p /tmp/vksb/VoiceKey && printf '{"channel":"all","onboarded":true}' > /tm
 XDG_DATA_HOME=/tmp/vksb ./target/debug/voicekey   # dirs::data_dir() 认这个环境变量
 ```
 
-沙箱里没有凭据文件，靠凭据的渠道会报 `invalid handle`（实测讯飞那行就是），但面板与候选行
-照常出现——按住热键（`channel=all` 时 `begin()` 直接进 `Mode::Pick`）面板就出来了，可以点行、
-点 ✕。两点提醒：单实例插件按 app_id 认领，**先停掉真应用**再起沙箱；沙箱实例照样在录音、
-往能用的渠道发请求，别一边验一边说话。
+沙箱里**一开始**没有凭据文件，面板与候选行照常出现——按住热键（`channel=all` 时 `begin()` 直接进
+`Mode::Pick`）面板就出来了，可以点行、点 ✕。两点提醒：单实例插件按 app_id 认领，**先停掉真应用**
+再起沙箱；沙箱实例照样在录音、往能用的渠道发请求，别一边验一边说话。
+
+**沙箱会自己建凭据文件**：豆包 / 微信 / 千问 / 百度 / 搜狗这五路在第一次请求时把设备号 / uin 之类
+写进 `XDG_DATA_HOME/VoiceKey/*.json`（`data_file()` 跟着 `XDG_DATA_HOME` 走）；讯飞用的是
+`ifly.rs` 里写死的 appid / key，不读文件。所以"沙箱里没有凭据文件"只影响第一次请求之前，
+跑起来之后沙箱和真配置一样能用。#7 在一个全新沙箱里连跑六个云端渠道，**全部出结果**
+（耗时见验证记录）。这也是沙箱顺带的好处：验渠道连通不必碰用户的凭据，用后把整个沙箱目录删掉即可。
 
 ### mac / Windows 编译回归在本机能验到哪
 
@@ -459,8 +597,8 @@ XDG_DATA_HOME=/tmp/vksb ./target/debug/voicekey   # dirs::data_dir() 认这个�
 ### KDE Plasma 6.8 / KWin 6.8（当前环境）
 
 - `cargo check --workspace --all-targets` 无警告；`cargo test --workspace` 全绿（`crates/platform`
-  28 项：浮层几何、规则生成、探针解析、INI 读写、`Order` 合并、`check` 的判定逻辑——含装上
-  规则 / 未装规则的 HUD 实测基线各一条）；mac / Windows 的编译回归：
+  32 项：浮层几何、规则生成、探针解析、INI 读写、`Order` 合并、`check` 的判定逻辑——含装上
+  规则 / 未装规则的 HUD 实测基线各一条；#6 又加了 4 项上屏前提的判定与文案）；mac / Windows 的编译回归：
   `cargo check -p voicekey-platform --target x86_64-apple-darwin` 与 `--target
   x86_64-pc-windows-msvc` 均通过
 - 前端类型检查上线：`app` 加 `npm run check`（`svelte-check` 读 `tsconfig.json` 那个 `strict`），
@@ -588,6 +726,65 @@ XDG_DATA_HOME=/tmp/vksb ./target/debug/voicekey   # dirs::data_dir() 认这个�
     是那条报错入口，跟着编过）。app 侧的改动（`main.rs` 一行 `inject_problem()`）按
     「[mac / Windows 编译回归在本机能验到哪](#mac--windows-编译回归在本机能验到哪)」的说明，
     本机只能给论证：与旧 `cfg!` 同型、类型中立
+- **端到端（#7）**：用「[端到端替身](#端到端替身没有麦克风时)」跑，热键、录音、识别、上屏全是真链路，
+  只有"说话"是 `paplay` 播的 `ios/Resources/sample.wav`。靶子是一扇 GTK 窗口的 `Gtk.Entry`，
+  判据是它的 `changed` 日志。**本轮没有改代码**——链路本来就是通的，这条票是验收。
+  - **文字落进输入框**：靶子日志 `CHANGED len=20 text='今天天气不错，我们下午一起去公园散步吧。'`，
+    与 `vk-test wetype` 的定稿逐字相同；KWin 事件流里同一时刻是
+    `ADDED voicekey|hud|620,936 680x120|active=false|wantsInput=false|keepAbove=true|noBorder=true|layer=3`
+    → 松开 → `REMOVED`，活动窗口自始至终是靶子（`active=vk7-target`；这条事件流脚本没打
+    `skipTaskbar`，那一项由上一条的 `vk-kwin dump` / `check` 覆盖）。用同一套编排连跑四轮（三轮
+    纯替身 + 一轮带截图和 `vk-kwin check`），都是同一句、同一落点。
+  - **普通应用的输入框**：另起一轮，靶子换成 **Kate**（`kate --new`，用 KWin 脚本把它的窗口设为
+    活动窗口，再用 uinput 注入 `Ctrl+N` 开一篇新的无标题文档）。同样的按住 → 播 wav → 松开之后，
+    Kate 的文档里出现整句 `今天天气不错，我们下午一起去公园散步吧。`，标题栏同步变成
+    `无标题(今天天气不错，我们下午一起去公园散步吧。) * — Kate`。这一轮证明上屏不依赖那个
+    GTK 替身——它和用户日常用的输入框走的是同一条路。
+  - **浮层不抢焦点**：HUD 映射那一刻靶子仍是 `active=true`；上屏那一下靶子的 `key-press-event` 里
+    直接看到 `Ctrl` 和 `PASTE-CLIPBOARD`——按键落在靶子上，不在胶囊里。`vk-kwin check` 在
+    HUD 开着时 `43 项全过（1 项跳过未验）`（pick 未映射记 skip），包括 `hud：不抢键盘焦点` 与 `贴底居中（620,936）`。
+  - **耗时**（各轮都是同一段 4.6 秒音频、松开时间不同；时间戳取自注入的"松开"与靶子日志里的 `CHANGED`）：
+
+    | 轮次 | 按住时长 | 松手 → 字进输入框 |
+    |---|---|---|
+    | 1 | 5.67s | **1.77s** |
+    | 2 | 5.67s | **1.73s** |
+    | 3 | 5.67s | **1.77s** |
+    | 带截图的最终轮 | 5.67s | **1.46s**（同一次里 `vk-kwin check` 也在跑） |
+    | 带预编辑的一轮（见下） | 5.69s | 识别正常；Ctrl+V 被输入法吃掉（靶子无变化） |
+
+    拆开看：松手到落字 = 识别收尾 + 上屏。收尾是等云端最后一个回复（定稿，
+    `wetype.rs` 里最多轮询 8×250ms）；上屏本身是 `wl-copy` 提交前固定等 80ms、虚拟键盘
+    冷启动预热 250ms（每轮都重启应用，所以每轮都吃这 250ms）。胶囊在松手后约 1.2s 消失，
+    再过 0.2–0.6 秒字进输入框（1.46s 那轮快些，1.77s 那几轮慢些）——即"胶囊消失"是上屏的
+    前一瞬，不是失败信号（`controller.rs` 里 `hud_hide(0)` 紧跟着 `insert`）。
+  - **识别链路连通与耗时**：外网经本机代理转发（fake-IP：`wetype.weixin.qq.com` 解析成
+    `198.18.0.12`，路由走 `Meta` 接口；直接 `curl` 该域名 TLS 握手约 150ms）。六个云端渠道用
+    `vk-test` 跑同一段 wav，**全部连通**——其中豆包 / 微信 / 千问 / 百度 / 搜狗五路在沙箱里
+    本来**没有**凭据文件，是首次请求时自己建的身份（讯飞用写死的 key，见
+    「[不碰用户设置](#不碰用户设置把-pick-面板弄出来)」）：
+
+    | 渠道 | 定稿 | 耗时 |
+    |---|---|---|
+    | 豆包 | 今天天气不错，我们下午一起去公园散步吧。 | 5.45s |
+    | 微信 | 同上 | 5.97s |
+    | 千问 | 同上 | 5.26s |
+    | 百度 | 今天天气不错我们下午一起去公园散步吧（无标点） | 5.07s |
+    | 搜狗 | 今天天气不错我们下午一起去公园散步（无标点、少"吧"） | 5.06s |
+    | 讯飞 | 今天天气不错，我们下午一起去公园散步吧。 | 5.18s |
+
+    这 5–6 秒里包含 `file_frames(realtime=true)` 按实时节奏喂 4.6 秒音频，所以音频播完后的收尾
+    约 0.5–1.4 秒（微信 5.97 − 4.6 ≈ 1.4s）。端到端那 1.46–1.77 秒 = 这段收尾 + 剪贴板等待 80ms +
+    虚拟键盘预热 250ms，两边对得上（1.46 那一轮识别收尾短些，正好落在下限）。代理没有让任何一个渠道不可达。
+  - **fcitx5 与 Ctrl+V**：见「[fcitx5 与 Ctrl+V](#fcitx5-与-ctrlv)」。本轮实测：没有预编辑时照常上屏，
+    有预编辑时那一下 Ctrl+V 被吃掉，剪贴板已经换成识别结果、输入框里没有字；热键与识别都不受影响。
+  - 用户数据：全程 `XDG_DATA_HOME=/tmp/vksb7` 跑沙箱，`~/.local/share/VoiceKey/` 六个文件的
+    `sha256sum` 与动手前一致（`settings.json` `d9c9e0ef…`），mtime 也没变。虚拟声卡与沙箱目录
+    用后即删 / 还原默认输入。
+  - 收尾：`cargo check --workspace --all-targets` 无警告、`cargo test --workspace` 全绿、
+    `app` 里 `npm run check` 101 文件 0 错 0 警、`npm test` 全过
+  - **没做的**：真人对着麦克风说一句（对照清单第 7 步）——这一步只能由人完成；
+    "全部渠道"模式的 pick 面板本轮没再复验（#5 已验过，与本票无关）。
 
 ### Arch + niri（历史，[ADR 0001](adr/0001-linux-targets-kwin-wayland.md) 之后不再代表当前环境）
 
@@ -601,4 +798,5 @@ XDG_DATA_HOME=/tmp/vksb ./target/debug/voicekey   # dirs::data_dir() 认这个�
 - AppImage 实跑无崩溃，热键同样触发 HUD
 - `deb`（5.7 MB）与 `AppImage`（102 MB）均产出
 
-未验证：真说话 → 识别 → 上屏 的完整链路，需麦克风输入。
+未验证：真说话 → 识别 → 上屏 的完整链路，需麦克风输入。（这一条后来在 KDE 环境上由 #7 补上，
+见上面的「端到端（#7）」——那边仍是用播出来的音频替身，真人开口那一步留给验收的人。）
