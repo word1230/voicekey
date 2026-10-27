@@ -43,3 +43,7 @@ _Avoid_: session (ambiguous with the desktop login session)
 **Insert**:
 To place recognised text into the focused app. On Linux this happens through the clipboard rather than by typing.
 _Avoid_: paste (that is the mechanism, not the act)
+
+**Polish**:
+A manual action, on its own shortcut: the currently selected text is sent to a user-configured OpenAI-compatible AI, and the selection is replaced with the tidied result. Distinct from the automatic per-channel tidying that some recognition channels apply on their own.
+_Avoid_: rewrite, refine, auto-fix

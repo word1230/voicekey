@@ -158,6 +158,17 @@ pub fn paste(text: &str) {
     });
 }
 
+/// 取当前选中的文本（Ctrl+C 前后比对剪贴板）。目前仅 Linux 实现，此处恒 None
+pub fn copy_selection() -> Option<String> {
+    None
+}
+
+/// 整理结果留在剪贴板的上屏。Windows 的 [`paste`] 自带恢复，而整理功能目前仅 Linux
+/// 实现，这里直接透传即可
+pub fn paste_keep(text: &str) {
+    paste(text);
+}
+
 /// 当前输入焦点的插入符屏幕坐标（物理像素）：先取 Win32 caret，再取 MSAA caret（Chromium 等）
 pub fn caret() -> Option<Rect> {
     unsafe {

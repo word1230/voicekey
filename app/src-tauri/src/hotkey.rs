@@ -18,6 +18,8 @@ pub enum HotEvent {
     /// 长按被取消，或短按没有变成点按
     Cancel,
     Escape,
+    /// AI 整理快捷键（修饰键+键的组合）按下
+    Polish,
     Pick(Special),
     Recorded(Option<Shortcut>),
     RecordedHold(Option<Combo>),
@@ -29,6 +31,8 @@ pub struct Config {
     pub hold: u32,
     pub chord: Option<Chord>,
     pub tap: Option<Shortcut>,
+    /// AI 整理快捷键
+    pub polish: Option<Shortcut>,
 }
 
 /// 长按组合：若干修饰键（区分左右）+ 至多一个普通键
@@ -71,6 +75,8 @@ pub struct Shared {
     pub recording: AtomicBool,
     /// 录制目标是长按组合（否则为点按快捷键）
     pub record_hold: AtomicBool,
+    /// 录制目标是 AI 整理快捷键（否则为点按快捷键；与 record_hold 互斥，录制开始时由命令设置）
+    pub record_polish: AtomicBool,
     /// 托盘「暂停监听」
     pub paused: AtomicBool,
 }
@@ -135,6 +141,15 @@ fn handle(sh: &Shared, st: &Arc<Mutex<State>>, tx: &UnboundedSender<HotEvent>, e
                     s.swallowed_code = Some(e.code);
                     if !e.repeat {
                         let _ = tx.send(HotEvent::Tap);
+                    }
+                    return true;
+                }
+            }
+            if let Some(p) = cfg.polish.as_ref().filter(|p| !p.is_modifier()) {
+                if e.code == p.code && e.mods & MOD_MASK == p.mods {
+                    s.swallowed_code = Some(e.code);
+                    if !e.repeat {
+                        let _ = tx.send(HotEvent::Polish);
                     }
                     return true;
                 }

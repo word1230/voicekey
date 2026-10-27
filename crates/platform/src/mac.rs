@@ -253,6 +253,17 @@ pub fn paste(text: &str) {
 struct SendPtr(*mut c_void);
 unsafe impl Send for SendPtr {}
 
+/// 取当前选中的文本（⌘C 前后比对剪贴板）。目前仅 Linux 实现，此处恒 None
+pub fn copy_selection() -> Option<String> {
+    None
+}
+
+/// 整理结果留在剪贴板的上屏。macOS 的 [`paste`] 自带恢复，而整理功能目前仅 Linux
+/// 实现，这里直接透传即可
+pub fn paste_keep(text: &str) {
+    paste(text);
+}
+
 fn ax_rect(v: Ref, kind: u32) -> Option<CGRect> {
     let mut r = CGRect::default();
     let ok = unsafe {

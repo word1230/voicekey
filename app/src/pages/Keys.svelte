@@ -9,15 +9,16 @@
     (mac ? [[1, "⌃"], [2, "⌥"], [4, "⇧"], [8, "⌘"]] : [[1, "Ctrl+"], [2, "Alt+"], [4, "Shift+"], [8, "Win+"]])
       .filter(([b]) => m & (b as number)).map(([, n]) => n).join("");
   const tap = $derived(s.tapShortcut ? prefix(s.tapShortcut.mods) + s.tapShortcut.name : "未设置");
+  const polish = $derived(s.polishShortcut ? prefix(s.polishShortcut.mods) + s.polishShortcut.name : "未设置");
 
-  let target = $state<"tap" | "hold">("tap");
-  const rec = (t: "tap" | "hold") => app.recording && target === t;
+  let target = $state<"tap" | "hold" | "polish">("tap");
+  const rec = (t: "tap" | "hold" | "polish") => app.recording && target === t;
 
-  function record(t: "tap" | "hold") {
+  function record(t: "tap" | "hold" | "polish") {
     const on = !rec(t);
     target = t;
     app.recording = on;
-    call("record_shortcut", { on, hold: t === "hold" });
+    call("record_shortcut", { on, hold: t === "hold", polish: t === "polish" });
   }
 </script>
 
@@ -47,6 +48,17 @@
       {#if s.tapShortcut && !rec("tap")}<button class="clear" title="关闭点按快捷键" onclick={() => save({ tapShortcut: null })}>✕</button>{/if}
     </div>
   </div>
+  <div class="kcard wide">
+    <div class="art"><span class="kbd">{polish}</span><span class="hint">选中文字 · 按下整理 · 结果替换原内容</span></div>
+    <h4>AI 整理</h4>
+    <small>把选中的文字交给 AI 整理后替换；服务在「AI 整理」页配置。需含普通键的组合（如 {mac ? "⌃⌥P" : "Ctrl+Alt+P"}）</small>
+    <div class="recrow">
+      <button class="rec" class:active={rec("polish")} onclick={() => record("polish")}>
+        {#if rec("polish")}请按下组合键…（Esc 取消）{:else}<span class="kbd mini">{polish}</span>点击后按下新的组合键{/if}
+      </button>
+      {#if s.polishShortcut && !rec("polish")}<button class="clear" title="关闭整理快捷键" onclick={() => save({ polishShortcut: null })}>✕</button>{/if}
+    </div>
+  </div>
 </div>
 {#if s.tapShortcut}
   <h3>点按模式</h3>
@@ -64,6 +76,7 @@
 
 <style>
   .keys { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .kcard.wide { grid-column: 1 / -1; }
   .kcard { background: var(--card); border: 1px solid var(--line); border-radius: var(--r); padding: 16px; }
   .art { height: 86px; border-radius: var(--rs); background: var(--card2); display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 12px; }
   .hint { color: var(--fg3); }

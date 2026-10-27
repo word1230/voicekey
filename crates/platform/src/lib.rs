@@ -14,7 +14,8 @@ mod win;
 use win as imp;
 
 pub use imp::{
-    caret, front_app, inject_device, inject_key, mute_output_start, paste, secure_input, start_hook, FrontApp,
+    caret, copy_selection, front_app, inject_device, inject_key, mute_output_start, paste, paste_keep,
+    secure_input, start_hook, FrontApp,
 };
 
 /// 浮层几何：给定工作区与浮层尺寸算落点，应用与 KWin 规则生成共用

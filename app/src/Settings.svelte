@@ -7,12 +7,14 @@
   import Keys from "./pages/Keys.svelte";
   import Audio from "./pages/Audio.svelte";
   import Output from "./pages/Output.svelte";
+  import Polish from "./pages/Polish.svelte";
   import General from "./pages/General.svelte";
   import Onboard from "./pages/Onboard.svelte";
 
   const PAGES = [
     { id: "recog", name: "识别", icon: '<path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zM5 11a7 7 0 0 0 14 0M12 18v3"/>' },
     { id: "keys", name: "快捷键", icon: '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/>' },
+    { id: "polish", name: "AI 整理", icon: '<path d="M4 20h16M9 15l6-10 3 5-4 7M7 12l2 3M5 15l2 3"/>' },
     { id: "audio", name: "音频", icon: '<path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/>' },
     { id: "output", name: "输出", icon: '<path d="M4 6h16M4 12h10M4 18h7M17 15l3 3-3 3"/>' },
     { id: "general", name: "通用", icon: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>' },
@@ -61,6 +63,7 @@
         {/if}
         {#if page === "recog"}<Recog />
         {:else if page === "keys"}<Keys />
+        {:else if page === "polish"}<Polish />
         {:else if page === "audio"}<Audio />
         {:else if page === "output"}<Output />
         {:else}<General rerun={() => (onboarding = true)} />{/if}

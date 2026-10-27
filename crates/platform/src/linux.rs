@@ -277,9 +277,41 @@ fn ascii_key(ch: char) -> Option<(KeyCode, bool)> {
     })
 }
 
-/// 借剪贴板 + Ctrl+V 上屏（Wayland 无法逐字打中文）。
-/// 复制失败时退回逐字打 ASCII。剪贴板不恢复（Wayland 剪贴板归属语义复杂）。
+/// 借剪贴板 + Ctrl+V 上屏（Wayland 无法逐字打中文）。复制失败时退回逐字打 ASCII。
+///
+/// 上屏完把原剪贴板文本放回去（mac / Windows 的 `paste` 同款语义）：借之前记下原内容，
+/// 等 1.2 秒——上屏方从 `wl-copy` 取数据通常在毫秒级——剪贴板还是我们的文本（期间没人
+/// 复制过别的）才写回。只能恢复文本：图片等多媒体读不回来，与旧版「不恢复」相比只差
+/// 在有得救的时候救。Wayland 的剪贴板是所有权制，重新 `wl-copy` 一遍原内容即为恢复，
+/// 原属主是谁、还活不活着都无所谓。
 pub fn paste(text: &str) {
+    let t = text.to_string();
+    thread::spawn(move || {
+        let saved = read_clipboard().filter(|s| s.as_str() != t);
+        if !copy_to_clipboard(&t) {
+            type_text(&t);
+            return;
+        }
+        // 等 wl-copy 把内容提交到合成器后再发 Ctrl+V
+        thread::sleep(Duration::from_millis(80));
+        emit(&[
+            keyev(KeyCode::KEY_LEFTCTRL, true),
+            keyev(KeyCode::KEY_V, true),
+            keyev(KeyCode::KEY_V, false),
+            keyev(KeyCode::KEY_LEFTCTRL, false),
+        ]);
+        if let Some(saved) = saved {
+            thread::sleep(Duration::from_millis(1200));
+            if read_clipboard().as_deref() == Some(t.as_str()) {
+                copy_to_clipboard(&saved);
+            }
+        }
+    });
+}
+
+/// 与 [`paste`] 相同的上屏，但**不**恢复剪贴板：结果留在剪贴板里——AI 整理的定稿
+/// 语义，整理出的文字用户往往还要贴去别处
+pub fn paste_keep(text: &str) {
     let t = text.to_string();
     thread::spawn(move || {
         if !copy_to_clipboard(&t) {
@@ -295,6 +327,51 @@ pub fn paste(text: &str) {
             keyev(KeyCode::KEY_LEFTCTRL, false),
         ]);
     });
+}
+
+/// 读剪贴板文本（读不到或为空返回 None）
+fn read_clipboard() -> Option<String> {
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let candidates: &[(&str, &[&str])] = if wayland {
+        &[("wl-paste", &["-n"]), ("xclip", &["-o", "-selection", "clipboard"])]
+    } else {
+        &[("xclip", &["-o", "-selection", "clipboard"]), ("wl-paste", &["-n"])]
+    };
+    for (cmd, args) in candidates {
+        if let Ok(out) = Command::new(cmd).args(*args).output() {
+            if out.status.success() && !out.stdout.is_empty() {
+                return Some(String::from_utf8_lossy(&out.stdout).into_owned());
+            }
+        }
+    }
+    None
+}
+
+/// 读 primary selection（中键粘贴的那个选区）。「选中文字」这个动作本身就会更新它：
+/// 读它不发任何键、不碰剪贴板，Klipper 这类剪贴板历史里不会留下任何痕迹
+fn read_primary() -> Option<String> {
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let candidates: &[(&str, &[&str])] = if wayland {
+        &[("wl-paste", &["-n", "-p"]), ("xclip", &["-o", "-selection", "primary"])]
+    } else {
+        &[("xclip", &["-o", "-selection", "primary"]), ("wl-paste", &["-n", "-p"])]
+    };
+    for (cmd, args) in candidates {
+        if let Ok(out) = Command::new(cmd).args(*args).output() {
+            if out.status.success() && !out.stdout.is_empty() {
+                return Some(String::from_utf8_lossy(&out.stdout).into_owned());
+            }
+        }
+    }
+    None
+}
+
+/// 取当前选中的文本：读 primary selection——选中即有，零按键、零剪贴板操作，剪贴板
+/// 历史里不留痕迹。代价：primary 全局共享，当前窗口没有选中而别处选过时，取到的是
+/// 那份旧内容（ Wayland 拿不到前台窗口信息，无法校验）。读不到 = 没有取到选中。
+/// 目前三平台里只有 Linux 实现。
+pub fn copy_selection() -> Option<String> {
+    read_primary().filter(|t| !t.trim().is_empty())
 }
 
 fn copy_to_clipboard(text: &str) -> bool {

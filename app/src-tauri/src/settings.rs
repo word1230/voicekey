@@ -78,6 +78,33 @@ pub struct Combo {
 
 pub const CUSTOM_HOLD: &str = "custom";
 
+/// AI 整理：OpenAI 兼容接口。选中文字 → 整理快捷键 → 结果覆盖原选区
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AiPolish {
+    pub enabled: bool,
+    /// 形如 https://api.example.com/v1，请求发到 {base_url}/chat/completions
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    /// 发给模型的 system 提示词
+    pub prompt: String,
+}
+
+impl Default for AiPolish {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+            prompt: "把这段文字整理通顺：去掉口语赘词和重复，修正明显的错别字，补上标点与分段。\
+                     保持原意和语气，不要改写、不要增删内容，不要回答、解释或评论，只输出整理后的文字。"
+                .into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -96,6 +123,10 @@ pub struct Settings {
     pub mute_while_recording: bool,
     /// 多渠道模式下同时识别的渠道（至少 2 个）
     pub multi: Vec<Channel>,
+    /// AI 整理的触发快捷键（需含普通键的组合，纯修饰键会与说话手势冲突）
+    pub polish_shortcut: Option<Shortcut>,
+    /// AI 整理（OpenAI 兼容接口）
+    pub ai: AiPolish,
     /// 候选框上次选中的渠道，下次默认聚焦
     pub last_pick: Option<Channel>,
     /// 候选框各渠道上屏次数，次数多的排前
@@ -127,6 +158,8 @@ impl Default for Settings {
             mic: String::new(),
             mute_while_recording: false,
             multi: Channel::engines().into_iter().filter(|&c| c != Channel::WetypeOffline).collect(),
+            polish_shortcut: None,
+            ai: AiPolish::default(),
             last_pick: None,
             pick_counts: HashMap::new(),
             autostart: false,

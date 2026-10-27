@@ -333,12 +333,26 @@ impl Ctl {
                     self.abort(None)
                 }
             }
+            HotEvent::Polish => {
+                // 整理动手时不能正说着话；候选面板打开时也不插手
+                if self.mode == Mode::Idle && !self.recording {
+                    crate::polish::start(self.app.clone());
+                }
+            }
             HotEvent::Pick(k) if self.mode == Mode::Pick => self.pick_key(k),
             HotEvent::Pick(_) => {}
             HotEvent::Recorded(sc) => {
                 let _ = self.app.emit_to("main", "recorded", sc.clone());
                 if let Some(sc) = sc {
-                    crate::update_settings(&self.app, |s| s.tap_shortcut = Some(sc));
+                    // 录制目标由 record_shortcut 命令落在 Shared 上，这里只管路由
+                    let polish = self.hk.record_polish.load(Ordering::Relaxed);
+                    crate::update_settings(&self.app, |s| {
+                        if polish {
+                            s.polish_shortcut = Some(sc);
+                        } else {
+                            s.tap_shortcut = Some(sc);
+                        }
+                    });
                 }
             }
             HotEvent::RecordedHold(c) => {

@@ -3,6 +3,7 @@
 mod controller;
 mod hotkey;
 mod offline;
+mod polish;
 mod settings;
 mod ui;
 mod update;
@@ -33,6 +34,7 @@ fn apply<R: Runtime>(app: &AppHandle<R>, s: &Settings) {
         let mut c = st.hk.config.write().unwrap();
         c.set_hold(&s.hold_codes());
         c.tap = s.tap_shortcut.clone();
+        c.polish = s.polish_shortcut.clone();
     }
     ui::refresh_tray(app, s, st.hk.paused.load(Ordering::Relaxed));
     let al = app.autolaunch();
@@ -171,9 +173,10 @@ fn microphones() -> Vec<String> {
 }
 
 #[tauri::command]
-fn record_shortcut(app: AppHandle, on: bool, hold: Option<bool>) {
+fn record_shortcut(app: AppHandle, on: bool, hold: Option<bool>, polish: Option<bool>) {
     let hk = &app.state::<AppState>().hk;
     hk.record_hold.store(hold.unwrap_or(false), Ordering::Relaxed);
+    hk.record_polish.store(polish.unwrap_or(false), Ordering::Relaxed);
     hk.recording.store(on, Ordering::Relaxed);
 }
 

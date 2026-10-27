@@ -11,9 +11,11 @@ import chatterfly from "../assets/logos/chatterfly.png";
 export type Channel = "doubao" | "wetype" | "qwen" | "baidu" | "sogou" | "iflytek" | "chatterfly" | "offline" | "wetypeoffline" | "all";
 export interface Shortcut { code: number; mods: number; name: string }
 export interface Combo { codes: number[]; name: string }
+export interface AiPolish { enabled: boolean; baseUrl: string; apiKey: string; model: string; prompt: string }
 export interface Settings {
   channel: Channel; holdKey: string; holdCombo: Combo | null; tapShortcut: Shortcut | null; silence: number; silenceStop: boolean; streaming: boolean;
   liveText: boolean; mic: string; muteWhileRecording: boolean; multi: Channel[]; lastPick: Channel | null; pickCounts: Partial<Record<Channel, number>>; autostart: boolean; theme: string; onboarded: boolean;
+  polishShortcut: Shortcut | null; ai: AiPolish;
 }
 export interface OfflineStatus { state: "missing" | "downloading" | "ready" | "failed"; progress?: number; error?: string }
 export interface Perms {
