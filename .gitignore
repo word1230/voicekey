@@ -3,5 +3,6 @@ build/
 *.app
 /target/
 /dist/
+/sourcecode/
 .DS_Store
 __pycache__/
