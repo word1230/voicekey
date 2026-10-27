@@ -105,7 +105,10 @@ impl Engine for QwenEngine {
             Ok(())
         }
         .await;
-        result?;
+        if let Err(e) = result {
+            let text = t.result();
+            return if text.is_empty() { Err(e) } else { Ok(text) };
+        }
         s.ws = Some(sink.reunite(stream).map_err(|_| anyhow!("千问连接合并失败"))?);
         s.reset();
         *self.session.lock().await = Some(s);

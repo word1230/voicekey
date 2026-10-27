@@ -6,12 +6,14 @@ import qwen from "../assets/logos/qwen.png";
 import baidu from "../assets/logos/baidu.png";
 import sogou from "../assets/logos/sogou.png";
 import iflytek from "../assets/logos/iflytek.png";
+import chatterfly from "../assets/logos/chatterfly.png";
 
-export type Channel = "doubao" | "wetype" | "qwen" | "baidu" | "sogou" | "iflytek" | "offline" | "wetypeoffline" | "all";
+export type Channel = "doubao" | "wetype" | "qwen" | "baidu" | "sogou" | "iflytek" | "chatterfly" | "offline" | "wetypeoffline" | "all";
 export interface Shortcut { code: number; mods: number; name: string }
+export interface Combo { codes: number[]; name: string }
 export interface Settings {
-  channel: Channel; holdKey: string; tapShortcut: Shortcut | null; silence: number; streaming: boolean;
-  liveText: boolean; mic: string; muteWhileRecording: boolean; multi: Channel[]; lastPick: Channel | null; autostart: boolean; theme: string; onboarded: boolean;
+  channel: Channel; holdKey: string; holdCombo: Combo | null; tapShortcut: Shortcut | null; silence: number; silenceStop: boolean; streaming: boolean;
+  liveText: boolean; mic: string; muteWhileRecording: boolean; multi: Channel[]; lastPick: Channel | null; pickCounts: Partial<Record<Channel, number>>; autostart: boolean; theme: string; onboarded: boolean;
 }
 export interface OfflineStatus { state: "missing" | "downloading" | "ready" | "failed"; progress?: number; error?: string }
 export interface Perms {
@@ -35,6 +37,8 @@ export interface Row { channel: Channel; text: string; state: RowState; ms: numb
 export interface Model { recording: boolean; rows: Row[]; sel: number }
 
 export const call = invoke;
+export const holdName = (s: Settings, keys: AppInfo["holdKeys"]) =>
+  s.holdKey === "custom" ? (s.holdCombo?.name ?? "") : (keys.find((k) => k.id === s.holdKey)?.name ?? "");
 export const on = <T>(name: string, f: (p: T) => void): Promise<UnlistenFn> => listen<T>(name, (e) => f(e.payload));
 
 export const CH: Record<Channel, { name: string; short: string; desc: string; tags: string[]; logo: string }> = {
@@ -44,6 +48,7 @@ export const CH: Record<Channel, { name: string; short: string; desc: string; ta
   baidu: { name: "百度输入法", short: "百度", desc: "百度输入法官方云端识别，中文流式出字。", tags: ["在线", "流式"], logo: baidu },
   sogou: { name: "搜狗输入法", short: "搜狗", desc: "搜狗输入法官方云端识别，中文流式出字。", tags: ["在线", "流式"], logo: sogou },
   iflytek: { name: "讯飞输入法", short: "讯飞", desc: "讯飞输入法官方云端识别，中文流式出字。", tags: ["在线", "流式"], logo: iflytek },
+  chatterfly: { name: "Chatterfly", short: "Chatterfly", desc: "Chatterfly 官方云端识别，中文流式出字。", tags: ["在线", "流式"], logo: chatterfly },
   offline: { name: "豆包离线", short: "豆包离线", desc: "豆包输入法离线引擎，本机运行，断网可用，不上传音频。", tags: ["离线", "约 190MB"], logo: doubao },
   wetypeoffline: { name: "微信离线", short: "微信离线", desc: "微信输入法官方离线模型，本机运行，断网可用，不上传音频。", tags: ["离线", "约 100MB"], logo: wetype },
   all: { name: "多渠道", short: "多渠道", desc: "勾选的渠道同时识别、实时出字，说完在光标处挑选最满意的一条上屏。", tags: ["并行", "流式候选"], logo: "" },

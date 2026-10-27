@@ -52,13 +52,15 @@ class Typer(private val node: AccessibilityNodeInfo) {
 }
 
 object Inject {
-    /** 写入失败时走输入连接提交，再不行走剪贴板粘贴，仍失败则只复制 */
-    fun insert(svc: VoiceService, node: AccessibilityNodeInfo?, text: String) {
-        if (node != null && Typer(node).update(text)) return
-        if (svc.commit(text)) return
+    /** 写入失败时走输入连接提交，再不行走剪贴板粘贴，仍失败则只复制；返回是否已写进输入框 */
+    fun insert(svc: VoiceService, node: AccessibilityNodeInfo?, text: String): Boolean {
+        if (node != null && Typer(node).update(text)) return true
+        if (svc.commit(text)) return true
         svc.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("VoiceKey", text))
         if (node == null || !node.refresh() || !node.performAction(AccessibilityNodeInfo.ACTION_PASTE)) {
             svc.hud.info("已复制，长按输入框粘贴")
+            return false
         }
+        return true
     }
 }

@@ -154,11 +154,18 @@ struct SessionView: View {
                          : "结束会话后停止待命、关闭麦克风。快到时间时键盘里会提醒，说话会自动续期。")
                 }
                 Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        LabeledContent("静音自动结束", value: String(format: "%g 秒", session.config.silenceSeconds))
-                        Slider(value: Binding(get: { session.config.silenceSeconds }, set: { session.config.silence = $0 }), in: 1...5, step: 0.5)
+                    Toggle("静音自动结束", isOn: Binding(get: { session.config.silenceStop != nil }, set: { session.config.silenceAuto = $0 }))
+                    if session.config.silenceStop != nil {
+                        VStack(alignment: .leading, spacing: 8) {
+                            LabeledContent("停顿时长", value: String(format: "%g 秒", session.config.silenceSeconds))
+                            Slider(value: Binding(get: { session.config.silenceSeconds }, set: { session.config.silence = $0 }), in: 1...5, step: 0.5)
+                        }
                     }
-                } footer: { Text("点键盘麦克风开始说话后，停顿超过这个时长视为说完、自动结束。") }
+                } footer: {
+                    Text(session.config.silenceStop != nil
+                         ? "点键盘麦克风开始说话后，停顿超过这个时长视为说完、自动结束。"
+                         : "已关闭：点键盘麦克风开始说话后，需再点一次结束。")
+                }
                 Section {
                     NavigationLink { HistoryView() } label: {
                         HStack(spacing: 12) {

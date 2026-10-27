@@ -31,7 +31,7 @@ fn apply<R: Runtime>(app: &AppHandle<R>, s: &Settings) {
     let st = app.state::<AppState>();
     {
         let mut c = st.hk.config.write().unwrap();
-        c.hold = s.hold_code();
+        c.set_hold(&s.hold_codes());
         c.tap = s.tap_shortcut.clone();
     }
     ui::refresh_tray(app, s, st.hk.paused.load(Ordering::Relaxed));
@@ -171,8 +171,10 @@ fn microphones() -> Vec<String> {
 }
 
 #[tauri::command]
-fn record_shortcut(app: AppHandle, on: bool) {
-    app.state::<AppState>().hk.recording.store(on, Ordering::Relaxed);
+fn record_shortcut(app: AppHandle, on: bool, hold: Option<bool>) {
+    let hk = &app.state::<AppState>().hk;
+    hk.record_hold.store(hold.unwrap_or(false), Ordering::Relaxed);
+    hk.recording.store(on, Ordering::Relaxed);
 }
 
 #[tauri::command]

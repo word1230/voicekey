@@ -1,18 +1,23 @@
 <script lang="ts">
   import { app, save } from "../lib/store.svelte";
-  import { call } from "../lib/api";
+  import { call, holdName } from "../lib/api";
 
   const s = $derived(app.s!);
   const mac = $derived(app.info!.platform === "mac");
-  const hold = $derived(app.info!.holdKeys.find((k) => k.id === s.holdKey)?.name ?? "");
+  const hold = $derived(holdName(s, app.info!.holdKeys));
   const prefix = (m: number) =>
     (mac ? [[1, "⌃"], [2, "⌥"], [4, "⇧"], [8, "⌘"]] : [[1, "Ctrl+"], [2, "Alt+"], [4, "Shift+"], [8, "Win+"]])
       .filter(([b]) => m & (b as number)).map(([, n]) => n).join("");
   const tap = $derived(s.tapShortcut ? prefix(s.tapShortcut.mods) + s.tapShortcut.name : "未设置");
 
-  function record() {
-    app.recording = !app.recording;
-    call("record_shortcut", { on: app.recording });
+  let target = $state<"tap" | "hold">("tap");
+  const rec = (t: "tap" | "hold") => app.recording && target === t;
+
+  function record(t: "tap" | "hold") {
+    const on = !rec(t);
+    target = t;
+    app.recording = on;
+    call("record_shortcut", { on, hold: t === "hold" });
   }
 </script>
 
@@ -25,17 +30,21 @@
     <small>适合短句，松手即识别完成</small>
     <select class="sel" value={s.holdKey} onchange={(e) => save({ holdKey: e.currentTarget.value })}>
       {#each app.info!.holdKeys as k}<option value={k.id}>{k.name}</option>{/each}
+      {#if s.holdCombo}<option value="custom">{s.holdCombo.name}</option>{/if}
     </select>
+    <button class="rec hold" class:active={rec("hold")} onclick={() => record("hold")}>
+      {#if rec("hold")}按住组合键再松开…（Esc 取消）{:else}自定义组合键，如 {mac ? "⌃ + ⌥" : "Ctrl + Alt"} 或 修饰键 + 空格{/if}
+    </button>
   </div>
   <div class="kcard">
-    <div class="art"><span class="kbd tap">{tap}</span><span class="hint">点一下开始 · 停顿自动结束</span></div>
+    <div class="art"><span class="kbd tap">{tap}</span><span class="hint">点一下开始 · {s.silenceStop ? "停顿自动结束" : "再点一下结束"}</span></div>
     <h4>点按说话</h4>
     <small>适合长段口述，再点一次可提前结束</small>
     <div class="recrow">
-      <button class="rec" class:active={app.recording} onclick={record}>
-        {#if app.recording}请按下快捷键…（Esc 取消）{:else}<span class="kbd mini">{tap}</span>点击后按下新的快捷键{/if}
+      <button class="rec" class:active={rec("tap")} onclick={() => record("tap")}>
+        {#if rec("tap")}请按下快捷键…（Esc 取消）{:else}<span class="kbd mini">{tap}</span>点击后按下新的快捷键{/if}
       </button>
-      {#if s.tapShortcut && !app.recording}<button class="clear" title="关闭点按快捷键" onclick={() => save({ tapShortcut: null })}>✕</button>{/if}
+      {#if s.tapShortcut && !rec("tap")}<button class="clear" title="关闭点按快捷键" onclick={() => save({ tapShortcut: null })}>✕</button>{/if}
     </div>
   </div>
 </div>
@@ -43,9 +52,12 @@
   <h3>点按模式</h3>
   <div class="group">
     <div class="row">
-      <div class="lbl">静音自动结束<small>停顿超过该时长视为说完</small></div>
-      <input type="range" min="1" max="5" step="0.5" value={s.silence} oninput={(e) => save({ silence: +e.currentTarget.value })} />
-      <b class="val">{s.silence} 秒</b>
+      <div class="lbl">静音自动结束<small>{s.silenceStop ? "停顿超过该时长视为说完" : "已关闭，需再点一次快捷键结束"}</small></div>
+      {#if s.silenceStop}
+        <input type="range" min="1" max="5" step="0.5" value={s.silence} oninput={(e) => save({ silence: +e.currentTarget.value })} />
+        <b class="val">{s.silence} 秒</b>
+      {/if}
+      <button class="sw" class:on={s.silenceStop} onclick={() => save({ silenceStop: !s.silenceStop })} aria-label="静音自动结束"></button>
     </div>
   </div>
 {/if}
@@ -66,6 +78,7 @@
   .recrow { display: flex; gap: 6px; align-items: center; }
   .rec { flex: 1; display: flex; align-items: center; gap: 6px; border: 1.5px dashed var(--accent); border-radius: var(--rs); padding: 6px 10px; color: var(--fg2); cursor: pointer; background: none; text-align: left; }
   .rec.active { background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); }
+  .rec.hold { width: 100%; margin-top: 8px; font-size: 12px; }
   .clear { border: 0; background: none; color: var(--fg3); cursor: pointer; font-size: 13px; padding: 4px; }
   input[type="range"] { accent-color: var(--accent); width: 180px; }
   .val { width: 48px; }

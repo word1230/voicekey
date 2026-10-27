@@ -13,6 +13,13 @@ use voicekey_wtlocal::{pack, LocalEngine};
 const PARTIAL: i32 = 0;
 const FINAL: i32 = 1;
 const ERROR: i32 = 2;
+/// 连接中断后自动重连，录音不中断；text 为提示文案
+const RECONNECT: i32 = 3;
+
+/// 断线重连的上限：次数、可回放的录音时长、回放间隔（服务端拒绝瞬间灌入）
+const RETRIES: u32 = 3;
+const REPLAY_MAX: usize = 60 * 50;
+const REPLAY_GAP: std::time::Duration = std::time::Duration::from_millis(5);
 
 struct Session(Mutex<Option<(mpsc::UnboundedSender<Vec<i16>>, Framer)>>);
 
@@ -39,9 +46,67 @@ fn engine(name: &str) -> Option<Box<dyn Engine>> {
         "baidu" => Box::new(BaiduEngine),
         "sogou" => Box::new(SogouEngine),
         "iflytek" => Box::new(IflyEngine),
+        "chatterfly" => Box::new(ChatterflyEngine),
         "wetypeoffline" => Box::new(LocalEngine { dir: wtoffline_dir() }),
         _ => return None,
     })
+}
+
+/// 断线重连：录音未结束时连接失败，回放已录的音频再接实时流重试
+struct Retry {
+    engine: Box<dyn Engine>,
+    sink: Arc<Sink>,
+    live: mpsc::UnboundedReceiver<Vec<i16>>,
+    buf: Vec<Vec<i16>>,
+    attempts: u32,
+}
+
+impl Retry {
+    async fn run(mut self) {
+        loop {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let feed = tokio::spawn(Self::feed(tx, std::mem::take(&mut self.buf), self.live));
+            let p = self.sink.clone();
+            let res = self.engine.run(rx, Box::new(move |t| p.emit(PARTIAL, t))).await;
+            // 引擎返回即已丢弃 rx，feed 随即自己结束，不用 abort（abort 会丢掉缓冲）
+            match res {
+                Ok(t) => return self.sink.emit(FINAL, &t),
+                Err(err) => {
+                    let Ok((done, frames, live)) = feed.await else { return self.sink.emit(ERROR, &format!("{err:#}")) };
+                    self.live = live;
+                    // 用户已松手或回放不完：按原样报错，不再重试
+                    if done || frames.len() > REPLAY_MAX || self.attempts >= RETRIES {
+                        return self.sink.emit(ERROR, &format!("{err:#}"));
+                    }
+                    self.attempts += 1;
+                    self.buf = frames;
+                    self.sink.emit(RECONNECT, "网络中断，正在重试");
+                }
+            }
+        }
+    }
+
+    /// 先按间隔回放缓冲，再转发实时帧；返回（录音是否已结束，期间收到的全部帧）
+    async fn feed(
+        tx: mpsc::UnboundedSender<Vec<i16>>,
+        buf: Vec<Vec<i16>>,
+        mut live: mpsc::UnboundedReceiver<Vec<i16>>,
+    ) -> (bool, Vec<Vec<i16>>, mpsc::UnboundedReceiver<Vec<i16>>) {
+        let mut all = buf;
+        for f in &all {
+            if tx.send(f.clone()).is_err() {
+                return (false, all, live);
+            }
+            tokio::time::sleep(REPLAY_GAP).await;
+        }
+        while let Some(f) = live.recv().await {
+            all.push(f.clone());
+            if tx.send(f).is_err() {
+                return (false, all, live);
+            }
+        }
+        (true, all, live)
+    }
 }
 
 fn string(env: &mut JNIEnv, s: &JString) -> Option<String> {
@@ -87,12 +152,7 @@ pub extern "system" fn Java_j3_voicekey_Native_start(
     let (Ok(framer), Ok(cb)) = (Framer::new(rate as u32), env.new_global_ref(listener)) else { return 0 };
     let (tx, rx) = mpsc::unbounded_channel();
     rt().spawn(async move {
-        let sink = Arc::new(Sink(cb));
-        let p = sink.clone();
-        match e.run(rx, Box::new(move |t| p.emit(PARTIAL, t))).await {
-            Ok(t) => sink.emit(FINAL, &t),
-            Err(err) => sink.emit(ERROR, &format!("{err:#}")),
-        }
+        Retry { engine: e, sink: Arc::new(Sink(cb)), live: rx, buf: Vec::new(), attempts: 0 }.run().await;
     });
     Box::into_raw(Box::new(Session(Mutex::new(Some((tx, framer)))))) as jlong
 }

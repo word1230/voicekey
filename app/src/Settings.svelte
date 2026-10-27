@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { app, init } from "./lib/store.svelte";
+  import { holdName } from "./lib/api";
   import Logo from "./lib/Logo.svelte";
   import Recog from "./pages/Recog.svelte";
   import Keys from "./pages/Keys.svelte";
@@ -23,7 +24,7 @@
     init().then(() => (onboarding = !app.s!.onboarded));
   });
 
-  const hold = $derived(app.info?.holdKeys.find((k) => k.id === app.s?.holdKey)?.name ?? "");
+  const hold = $derived(app.s && app.info ? holdName(app.s, app.info.holdKeys) : "");
 </script>
 
 {#if app.s && app.info}

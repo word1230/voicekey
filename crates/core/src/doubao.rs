@@ -75,11 +75,11 @@ struct Transcript {
 
 impl Transcript {
     fn result(&self) -> String {
-        if self.sentences.is_empty() {
-            self.current.clone()
-        } else {
-            join_sentences(&self.sentences.values().collect::<Vec<_>>())
+        let mut parts: Vec<&String> = self.sentences.values().collect();
+        if !self.current.is_empty() {
+            parts.push(&self.current);
         }
+        join_sentences(&parts)
     }
 
     fn update(&mut self, json: &str) -> Option<String> {
@@ -411,5 +411,23 @@ impl DoubaoDevice {
         }
 
         Ok(Self { did, phone })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Transcript;
+
+    #[test]
+    fn result_keeps_unfinished_sentence() {
+        let mut t = Transcript::default();
+        let shown = t.update(
+            r#"{"results":[
+                {"text":"第一句","index":0,"is_interim":false,"is_vad_finished":true},
+                {"text":"还没定稿","index":1,"is_interim":true}
+            ]}"#,
+        );
+        assert_eq!(shown.as_deref(), Some("第一句还没定稿"));
+        assert_eq!(t.result(), "第一句还没定稿");
     }
 }

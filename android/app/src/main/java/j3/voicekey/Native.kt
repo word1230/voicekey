@@ -5,12 +5,14 @@ object Native {
     const val PARTIAL = 0
     const val FINAL = 1
     const val ERROR = 2
+    /** 连接中断后自动重连，录音不中断；text 为提示文案 */
+    const val RECONNECT = 3
 
     init {
         System.loadLibrary("voicekey")
     }
 
-    /** 在 Rust 工作线程上回调；每个会话恰好一次 FINAL 或 ERROR */
+    /** 在 Rust 工作线程上回调；每个会话恰好一次 FINAL 或 ERROR，重连期间可多次 RECONNECT */
     fun interface Listener {
         fun onEvent(kind: Int, text: String)
     }

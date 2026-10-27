@@ -46,6 +46,17 @@ final class ProtocolTests: XCTestCase {
         for _ in 0..<70 { XCTAssertFalse(d.feed(rms: 0.003, duration: 0.02)) }
     }
 
+    func testSilenceDetectorQuietSpeechKeptByRecognition() {
+        var d = SilenceDetector(hold: 1.5)
+        for _ in 0..<70 { XCTAssertFalse(d.feed(rms: 0.003, duration: 0.02)) }
+        d.voice()
+        XCTAssertTrue(d.heard)
+        for _ in 0..<70 { XCTAssertFalse(d.feed(rms: 0.003, duration: 0.02)) }
+        d.voice()
+        for _ in 0..<70 { XCTAssertFalse(d.feed(rms: 0.003, duration: 0.02)) }
+        XCTAssertTrue((0..<10).contains { _ in d.feed(rms: 0.003, duration: 0.02) })
+    }
+
     func testIdleExpiry() {
         XCTAssertNil(Idle.expiry(lastActivity: 100, seconds: 0, standby: .mic, busy: false, now: 200))
         XCTAssertEqual(Idle.expiry(lastActivity: 100, seconds: 600, standby: .mic, busy: false, now: 200), 700)
@@ -82,6 +93,11 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(c.silenceSeconds, 5)
         let legacy = try JSONDecoder().decode(Config.self, from: JSONEncoder().encode(Config.initial))
         XCTAssertEqual(legacy.silenceSeconds, 1.5)
+        XCTAssertEqual(legacy.silenceStop, 1.5)
+        c.silenceAuto = false
+        c = try JSONDecoder().decode(Config.self, from: JSONEncoder().encode(c))
+        XCTAssertNil(c.silenceStop)
+        XCTAssertEqual(c.silenceSeconds, 5)
     }
 
     func testPipUpgradeAndModeSwitchPreserveSavedSettings() throws {

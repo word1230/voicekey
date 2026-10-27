@@ -23,18 +23,40 @@ class Prefs(ctx: Context) {
         get() = Channel.of(sp.getString("lastPick", null))
         set(v) = sp.edit().putString("lastPick", v?.id).apply()
 
+    /** 候选框各渠道上屏次数，次数多的排前 */
+    fun pickCount(ch: Channel) = sp.getInt("pickCount.${ch.id}", 0)
+
+    fun countPick(ch: Channel) = sp.edit().putInt("pickCount.${ch.id}", pickCount(ch) + 1).apply()
+
     /** 点按说话时静音多少秒自动结束 */
     var silence: Float
         get() = sp.getFloat("silence", 1.5f).coerceIn(1f, 5f)
         set(v) = sp.edit().putFloat("silence", v).apply()
 
+    /** 关闭后点按说话只能再点一次结束 */
+    var silenceStop: Boolean
+        get() = sp.getBoolean("silenceStop", true)
+        set(v) = sp.edit().putBoolean("silenceStop", v).apply()
+
     var streaming: Boolean
         get() = sp.getBoolean("streaming", true)
         set(v) = sp.edit().putBoolean("streaming", v).apply()
 
+    /** 多渠道候选：点一条上屏并发送，长按只上屏 */
+    var pickSend: Boolean
+        get() = sp.getBoolean("pickSend", false)
+        set(v) = sp.edit().putBoolean("pickSend", v).apply()
+
+    /** 长按说话开关（沿用旧键名） */
     var volumeKey: Boolean
         get() = sp.getBoolean("volumeKey", true)
         set(v) = sp.edit().putBoolean("volumeKey", v).apply()
+
+    var holdKeys: List<Int>
+        get() = sp.getString("holdKeys", null)?.split(',')?.mapNotNull { it.toIntOrNull() }?.takeIf { it.isNotEmpty() } ?: Keys.DEFAULT
+        set(v) = sp.edit().putString("holdKeys", v.joinToString(",")).apply()
+
+    val holdName get() = Keys.name(holdKeys)
 
     var bubble: Boolean
         get() = sp.getBoolean("bubble", true)

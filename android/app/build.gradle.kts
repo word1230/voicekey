@@ -15,8 +15,8 @@ android {
         applicationId = "do.j3.voicekey"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 5
+        versionName = "0.4.1"
         ndk { abiFilters += "arm64-v8a" }
     }
 
@@ -57,4 +57,5 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
+    testImplementation("junit:junit:4.13.2")
 }

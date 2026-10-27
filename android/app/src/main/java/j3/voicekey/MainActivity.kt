@@ -43,11 +43,13 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -89,6 +91,12 @@ class MainActivity : ComponentActivity() {
         tick++
         MicService.start(this)
     }
+
+    /** 离开设置页即取消按键录制，免得全局吞键 */
+    override fun onPause() {
+        super.onPause()
+        VoiceService.instance?.let { s -> s.recorder?.let { s.recorder = null; it(null) } }
+    }
 }
 
 @Composable
@@ -106,8 +114,20 @@ private fun Screen(tick: Int, refresh: () -> Unit) {
     var channel by remember { mutableStateOf(p.channel) }
     var multi by remember { mutableStateOf(p.multi.toSet()) }
     var streaming by remember { mutableStateOf(p.streaming) }
+    var pickSend by remember { mutableStateOf(p.pickSend) }
     var silence by remember { mutableFloatStateOf(p.silence) }
+    var silenceStop by remember { mutableStateOf(p.silenceStop) }
     var volumeKey by remember { mutableStateOf(p.volumeKey) }
+    var holdName by remember { mutableStateOf(p.holdName) }
+    var recording by remember { mutableStateOf(false) }
+    DisposableEffect(recording) {
+        val svc = VoiceService.instance
+        if (recording) svc?.recorder = { keys ->
+            recording = false
+            if (keys != null) holdName = p.holdName
+        }
+        onDispose { if (svc?.recorder != null) svc.recorder = null }
+    }
     var bubble by remember { mutableStateOf(p.bubble) }
     var bubbleAlways by remember { mutableStateOf(p.bubbleAlways) }
     var trial by remember { mutableStateOf("") }
@@ -121,7 +141,7 @@ private fun Screen(tick: Int, refresh: () -> Unit) {
             Spacer(Modifier.width(10.dp))
             Text("VoiceKey", style = MaterialTheme.typography.headlineMedium)
         }
-        Text("不用换输入法：在任意输入框里长按音量下键或悬浮球说话，识别结果直接写进输入框。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("不用换输入法：在任意输入框里长按${holdName}或悬浮球说话，识别结果直接写进输入框。", color = MaterialTheme.colorScheme.onSurfaceVariant)
 
         if (!a11y) Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -186,16 +206,31 @@ private fun Screen(tick: Int, refresh: () -> Unit) {
                         Text(ch.title + if (ch.ready) "" else "（未下载，跳过）")
                     }
                 }
+                Toggle("点一条直接发送", if (pickSend) "点候选上屏并发送，长按候选只上屏、可继续编辑" else "点候选上屏；开启后点一条直接发送，长按上屏编辑", pickSend) {
+                    pickSend = it
+                    p.pickSend = it
+                }
             }
             Offline()
         }
 
         Section("说话方式") {
-            Toggle("长按音量下键说话", "仅在输入框聚焦时生效，短按仍调音量", volumeKey) {
+            val volumeOnly = p.holdKeys.all { it in Keys.volume }
+            Toggle("长按${holdName}说话", "仅在输入框聚焦时生效" + if (volumeOnly) "，短按仍调音量" else "", volumeKey) {
                 volumeKey = it
                 p.volumeKey = it
             }
-            Toggle("悬浮球", "点一下说话，停顿后自动结束；长按说话，松开结束", bubble) {
+            if (volumeKey) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Hint(if (recording) "按住想用的键（可多个一起按），松开即保存；返回键取消" else "可换成音量上键、耳机键、外接键盘组合等", Modifier.weight(1f))
+                    if (!recording && p.holdKeys != Keys.DEFAULT) TextButton({
+                        p.holdKeys = Keys.DEFAULT
+                        holdName = p.holdName
+                    }) { Text("恢复默认") }
+                    OutlinedButton({ recording = !recording }, enabled = a11y) { Text(if (recording) "取消" else "自定义按键") }
+                }
+            }
+            Toggle("悬浮球", "点一下说话，${if (silenceStop) "停顿后自动结束" else "再点一下结束"}；长按说话，松开结束", bubble) {
                 bubble = it
                 p.bubble = it
                 VoiceService.instance?.refresh()
@@ -209,12 +244,15 @@ private fun Screen(tick: Int, refresh: () -> Unit) {
                 streaming = it
                 p.streaming = it
             }
-            Text("点按说话：静音 ${"%.1f".format(silence)} 秒自动结束")
-            Slider(silence, { silence = (it * 2).roundToInt() / 2f; p.silence = silence }, valueRange = 1f..5f, steps = 7)
+            Toggle("点按说话：静音自动结束", if (silenceStop) "停顿 ${"%.1f".format(silence)} 秒视为说完" else "已关闭，需再点一次结束", silenceStop) {
+                silenceStop = it
+                p.silenceStop = it
+            }
+            if (silenceStop) Slider(silence, { silence = (it * 2).roundToInt() / 2f; p.silence = silence }, valueRange = 1f..5f, steps = 7)
         }
 
         Section("试一试") {
-            OutlinedTextField(trial, { trial = it }, Modifier.fillMaxWidth(), placeholder = { Text("点这里，然后长按音量下键说话") }, minLines = 3)
+            OutlinedTextField(trial, { trial = it }, Modifier.fillMaxWidth(), placeholder = { Text("点这里，然后长按${holdName}说话") }, minLines = 3)
         }
 
         Hint("本项目通过分析输入法客户端协议实现，仅供学习与个人使用；语音会发送到所选厂商的服务器（离线渠道除外）。")
@@ -232,7 +270,8 @@ private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) 
 }
 
 @Composable
-private fun Hint(text: String) = Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun Hint(text: String, modifier: Modifier = Modifier) =
+    Text(text, modifier, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
 @Composable
 private fun Step(title: String, done: Boolean, action: String, onClick: () -> Unit) {

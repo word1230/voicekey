@@ -11,7 +11,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tauri::async_runtime::JoinHandle;
 use voicekey_core::audio::Recorder;
-use voicekey_core::{BaiduEngine, DoubaoEngine, Engine, IflyEngine, QwenEngine, SogouEngine, WeTypeEngine};
+use voicekey_core::{BaiduEngine, ChatterflyEngine, DoubaoEngine, Engine, IflyEngine, QwenEngine, SogouEngine, WeTypeEngine};
 use voicekey_platform::{self as pf, Special, Typer};
 
 pub enum Msg {
@@ -76,17 +76,19 @@ impl Segments {
         self.parts.len() - 1
     }
 
-    fn partial(&mut self, i: usize, text: String) -> bool {
+    /// None：该段已定稿，丢弃；Some(changed)：文字是否有变化
+    fn partial(&mut self, i: usize, text: String) -> Option<bool> {
         match self.parts.get_mut(i) {
             Some((t, false)) => {
+                let changed = *t != text;
                 *t = text;
-                true
+                Some(changed)
             }
-            _ => false,
+            _ => None,
         }
     }
 
-    /// keep_partial：流式上屏时已打出的片段在定稿为空或失败时保留
+    /// keep_partial：流式上屏时，定稿为空也保留已打出的片段。失败一律留下已显示的中间结果
     fn done(&mut self, i: usize, res: Result<String, String>, keep_partial: bool) {
         let Some((t, done)) = self.parts.get_mut(i) else { return };
         if *done {
@@ -100,12 +102,7 @@ impl Segments {
                     t.clear()
                 }
             }
-            Err(e) => {
-                if !keep_partial {
-                    t.clear()
-                }
-                self.error = Some(e);
-            }
+            Err(e) => self.error = Some(e),
         }
     }
 
@@ -176,6 +173,7 @@ pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) 
     engines.insert(Channel::Baidu, Arc::new(BaiduEngine));
     engines.insert(Channel::Sogou, Arc::new(SogouEngine));
     engines.insert(Channel::Iflytek, Arc::new(IflyEngine));
+    engines.insert(Channel::Chatterfly, Arc::new(ChatterflyEngine));
     if let Some(e) = offline::engine() {
         engines.insert(Channel::Offline, e);
     }
@@ -341,6 +339,15 @@ impl Ctl {
                 let _ = self.app.emit_to("main", "recorded", sc.clone());
                 if let Some(sc) = sc {
                     crate::update_settings(&self.app, |s| s.tap_shortcut = Some(sc));
+                }
+            }
+            HotEvent::RecordedHold(c) => {
+                let _ = self.app.emit_to("main", "recorded", c.is_some());
+                if let Some(c) = c {
+                    crate::update_settings(&self.app, |s| {
+                        s.hold_key = crate::settings::CUSTOM_HOLD.into();
+                        s.hold_combo = Some(c);
+                    });
                 }
             }
         }
@@ -542,8 +549,12 @@ impl Ctl {
         ui::hud(&self.app, if self.recording { "listen" } else { "wait" }, &text, ch);
     }
 
-    fn begin_multi(&mut self, mode: Mode, channels: Vec<Channel>, auto_stop: bool) {
+    fn begin_multi(&mut self, mode: Mode, mut channels: Vec<Channel>, auto_stop: bool) {
         let Some(audio) = self.start_recorder() else { return };
+        if mode == Mode::Pick {
+            let n = self.settings().pick_counts;
+            channels.sort_by_key(|c| std::cmp::Reverse(n.get(c).copied().unwrap_or(0)));
+        }
         self.auto_stop = auto_stop;
         self.gen += 1;
         self.mode = mode;
@@ -605,8 +616,9 @@ impl Ctl {
     fn partial(&mut self, ch: Channel, seg: usize, text: String) {
         match self.mode {
             Mode::Single(_) => {
-                if !self.segs.partial(seg, text) {
-                    return;
+                let Some(changed) = self.segs.partial(seg, text) else { return };
+                if changed {
+                    self.speaking();
                 }
                 if let Some(t) = self.typer.as_mut() {
                     t.update(&self.segs.text());
@@ -615,8 +627,11 @@ impl Ctl {
             }
             Mode::Pick | Mode::Compare => {
                 if let Some(i) = self.rows.iter().position(|r| r.channel == ch) {
-                    if self.row_segs[i].partial(seg, text) {
+                    if let Some(changed) = self.row_segs[i].partial(seg, text) {
                         self.rows[i].text = self.row_segs[i].text();
+                        if changed {
+                            self.speaking();
+                        }
                     }
                 }
                 self.emit_rows();
@@ -654,7 +669,12 @@ impl Ctl {
                     if !streamed && !text.is_empty() {
                         self.insert(&text);
                     }
-                    ui::hud_error(&self.app, &format!("识别失败：{e}"));
+                    let msg = if text.is_empty() {
+                        format!("识别失败：{e}")
+                    } else {
+                        format!("识别失败：{e}，已保留已识别的文字")
+                    };
+                    ui::hud_error(&self.app, &msg);
                 } else if streamed {
                     ui::hud_hide(&self.app, 0);
                 } else if text.is_empty() {
@@ -711,19 +731,26 @@ impl Ctl {
         }
     }
 
-    /// 说过话后静音超过设定时长即结束；一直没开口则 8 秒后放弃
+    /// 说过话后静音超过设定时长即结束；一直没开口则 8 秒后放弃。设置里关闭后只能手动结束
     fn check_silence(&mut self, level: f32) {
-        if !self.recording || !self.auto_stop {
+        if !self.recording || !self.auto_stop || !self.settings.read().unwrap().silence_stop {
             return;
         }
         if level > 0.3 {
-            self.heard_voice = true;
-            self.last_voice = Instant::now();
+            self.speaking();
         } else {
             let limit = if self.heard_voice { self.settings().silence } else { 8.0 };
             if self.last_voice.elapsed().as_secs_f64() > limit {
                 self.end();
             }
+        }
+    }
+
+    /// 音量够大或识别文字仍在变化都算在说话：说话声小、离麦远时音量常低于阈值，单看音量会中途误判静音
+    fn speaking(&mut self) {
+        if self.recording {
+            self.heard_voice = true;
+            self.last_voice = Instant::now();
         }
     }
 
@@ -761,6 +788,12 @@ impl Ctl {
             return;
         }
         let mode = self.mode;
+        let streamed = self.typer.is_some();
+        let partial = match mode {
+            Mode::Single(_) => self.segs.text(),
+            Mode::Pick => self.rows.get(self.sel).map(|r| r.text.clone()).unwrap_or_default(),
+            Mode::Compare | Mode::Idle => String::new(),
+        };
         self.cancel();
         if mode == Mode::Pick {
             if let Some(f) = self.front.take() {
@@ -771,13 +804,28 @@ impl Ctl {
             for r in &mut self.rows {
                 if matches!(r.state, RowState::Listen | RowState::Wait) {
                     r.state = RowState::Error;
-                    r.text = message.clone().unwrap_or_else(|| "已取消".into());
+                    if r.text.is_empty() {
+                        r.text = message.clone().unwrap_or_else(|| "已取消".into());
+                    }
                 }
             }
             self.emit_rows();
             return;
         }
+        // 超时打断时，非流式还没写进输入框的中间结果补上；用户主动取消不补写
+        if message.is_some() && !streamed && !partial.is_empty() {
+            if mode == Mode::Pick {
+                let text = partial.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    pf::paste(&text);
+                });
+            } else {
+                pf::paste(&partial);
+            }
+        }
         match message {
+            Some(m) if !partial.is_empty() => ui::hud_error(&self.app, &format!("{m}，已保留已识别的文字")),
             Some(m) => ui::hud_error(&self.app, &m),
             None => ui::hud_hide(&self.app, 0),
         }
@@ -849,9 +897,10 @@ impl Ctl {
         }
         let text = r.text.clone();
         let ch = r.channel;
-        if self.settings().last_pick != Some(ch) {
-            crate::update_settings(&self.app, |s| s.last_pick = Some(ch));
-        }
+        crate::update_settings(&self.app, |s| {
+            s.last_pick = Some(ch);
+            *s.pick_counts.entry(ch).or_default() += 1;
+        });
         let front = self.front.take();
         self.cancel();
         let app = self.app.clone();
@@ -915,27 +964,34 @@ mod tests {
     fn resumed_segments_join_in_order_and_wait_for_all() {
         let mut s = Segments::default();
         let a = s.start();
-        assert!(s.partial(a, "今天".into()));
+        assert_eq!(s.partial(a, "今天".into()), Some(true));
         let b = s.start();
-        assert!(s.partial(b, "天气".into()));
+        assert_eq!(s.partial(b, "天气".into()), Some(true));
+        assert_eq!(s.partial(b, "天气".into()), Some(false));
         s.done(b, Ok("天气不错。".into()), false);
         assert!(!s.finished());
         s.done(a, Ok("今天，".into()), false);
         assert!(s.finished());
         assert_eq!(s.text(), "今天，天气不错。");
-        assert!(!s.partial(a, "迟到".into()));
+        assert_eq!(s.partial(a, "迟到".into()), None);
     }
 
     #[test]
-    fn failed_segment_keeps_other_text_and_reports_error() {
+    fn failed_segment_keeps_partial_text_and_reports_error() {
         let mut s = Segments::default();
         let a = s.start();
         let b = s.start();
         s.partial(b, "半句".into());
         s.done(a, Ok("第一句".into()), false);
         s.done(b, Err("网络".into()), false);
-        assert_eq!(s.text(), "第一句");
+        assert_eq!(s.text(), "第一句半句");
         assert_eq!(s.error.as_deref(), Some("网络"));
+
+        let mut timed_out = Segments::default();
+        let d = timed_out.start();
+        timed_out.partial(d, "已经打出来的字".into());
+        timed_out.done(d, Err("识别超时".into()), false);
+        assert_eq!(timed_out.text(), "已经打出来的字");
 
         let mut streamed = Segments::default();
         let c = streamed.start();

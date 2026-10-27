@@ -453,7 +453,12 @@ final class SessionManager: ObservableObject {
         case .commit:
             if current, let u = utt, let r = u.rows.first(where: { $0.channel.id == c.channel }) {
                 record(u, r)
-                if u.rows.count > 1 { config.lastPick = r.channel.id }
+                if u.rows.count > 1 {
+                    var cfg = config
+                    cfg.lastPick = r.channel.id
+                    cfg.pickCounts = (cfg.pickCounts ?? [:]).merging([r.channel.id: 1], uniquingKeysWith: +)
+                    config = cfg
+                }
                 closeUtterance()
             }
         case .touch: break
@@ -474,7 +479,7 @@ final class SessionManager: ObservableObject {
         }
         if !active, !arm() { return fail(.noSession) }
         if interrupted, !tryResume() { return fail(.micBusy) }
-        let chans = config.resolve(c.channels)
+        let chans = config.byPicks(config.resolve(c.channels))
         guard !chans.isEmpty else { return fail(.noChannel) }
         if let e = heatUp() {
             fail(e)
@@ -606,19 +611,30 @@ final class SessionManager: ObservableObject {
         switch e {
         case .partial(let t):
             guard s.state == .listening || s.state == .finalizing else { return }
+            if s.state == .listening, s.text != t {
+                lock.lock()
+                detector?.voice()
+                lock.unlock()
+            }
             s.text = t
         case .final(let t):
-            s.text = t
+            if !t.isEmpty { s.text = t }
             s.state = .final
             s.doneAt = VK.now
             u.rows[r].cores[seg] = nil
-            Bus.log("final #\(id) \(u.rows[r].channel.id)/\(seg): \(t)")
+            Bus.log("final #\(id) \(u.rows[r].channel.id)/\(seg): \(s.text)")
         case .failure(let m):
-            s.state = .error
-            s.error = Self.friendly(m)
             s.doneAt = VK.now
             u.rows[r].cores[seg] = nil
-            Bus.log("error #\(id) \(u.rows[r].channel.id)/\(seg): \(m)")
+            if s.text.isEmpty {
+                s.state = .error
+                s.error = Self.friendly(m)
+                Bus.log("error #\(id) \(u.rows[r].channel.id)/\(seg): \(m)")
+            } else {
+                // 字已经显示出来了，超时或断线不能再把整句回删掉
+                s.state = .final
+                Bus.log("keep #\(id) \(u.rows[r].channel.id)/\(seg) after \(m): \(s.text)")
+            }
         }
         u.rows[r].segs[seg] = s
         settle(u)

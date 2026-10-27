@@ -125,7 +125,7 @@ final class DoubaoEngine: ASREngine {
         var result: String {
             lock.withLock {
                 let done = sentences.keys.sorted().compactMap { sentences[$0] }
-                return joinSentences(done.isEmpty ? [current] : done)
+                return joinSentences(done + [current])
             }
         }
 

@@ -28,6 +28,7 @@ class Session(private val svc: VoiceService) {
     private var releasedAt = 0L
     private var userPicked = false
     private var choosePending = false
+    private var chooseSend = false
 
     var rows: List<Row> = emptyList()
         private set
@@ -66,10 +67,11 @@ class Session(private val svc: VoiceService) {
         MicService.start(svc)
         val g = ++gen
         target = svc.focusedInput()
-        rows = ready.map { Row(it) }
+        rows = (if (ready.size > 1) ready.sortedByDescending { App.prefs.pickCount(it) } else ready).map { Row(it) }
         picking = rows.size > 1
         userPicked = false
         choosePending = false
+        chooseSend = false
         sel = 0
         if (picking) {
             rows.indexOfFirst { it.ch == App.prefs.lastPick }.takeIf { it >= 0 }?.let { sel = it; userPicked = true }
@@ -101,7 +103,7 @@ class Session(private val svc: VoiceService) {
 
     private fun level(v: Float) {
         svc.onLevel(v)
-        if (!autoStop || !recording) return
+        if (!autoStop || !recording || !App.prefs.silenceStop) return
         val now = SystemClock.elapsedRealtime()
         if (v > 0.3f) {
             heard = true
@@ -128,18 +130,34 @@ class Session(private val svc: VoiceService) {
     private fun event(g: Int, row: Row, kind: Int, text: String) {
         if (g != gen || row.state == State.Final || row.state == State.Error) return
         when (kind) {
+            Native.RECONNECT -> return svc.hud.info(text)
             Native.PARTIAL -> {
+                // 识别文字仍在变化即视为在说话，避免声音小时被静音判定中途截断
+                if (recording && text != row.text) {
+                    heard = true
+                    lastVoice = SystemClock.elapsedRealtime()
+                }
                 row.text = text
                 if (typer?.update(text) == true) typed = true
             }
             Native.FINAL -> {
-                row.text = text.ifEmpty { "没有识别到内容" }
-                row.state = if (text.isEmpty()) State.Error else State.Final
+                if (text.isNotEmpty()) row.text = text
+                if (row.text.isEmpty()) {
+                    row.text = "没有识别到内容"
+                    row.state = State.Error
+                } else {
+                    row.state = State.Final
+                }
                 row.ms = if (recording) 0 else SystemClock.elapsedRealtime() - releasedAt
             }
             else -> {
-                row.text = text
-                row.state = State.Error
+                if (row.text.isEmpty()) {
+                    row.text = text
+                    row.state = State.Error
+                } else {
+                    row.state = State.Final
+                    row.ms = if (recording) 0 else SystemClock.elapsedRealtime() - releasedAt
+                }
             }
         }
         if (kind == Native.PARTIAL) return svc.onSessionChanged()
@@ -147,7 +165,7 @@ class Session(private val svc: VoiceService) {
         val cur = rows[sel].state
         if (row.state == State.Final && cur != State.Final && (!userPicked || cur == State.Error)) sel = rows.indexOf(row)
         if (choosePending && rows[sel].state == State.Error) rows.indexOfFirst { it.state == State.Final }.takeIf { it >= 0 }?.let { sel = it }
-        if (choosePending && rows[sel].state == State.Final) return choose(sel)
+        if (choosePending && rows[sel].state == State.Final) return choose(sel, chooseSend)
         if (rows.none { it.state == State.Listen || it.state == State.Wait }) choosePending = false
         svc.onSessionChanged()
     }
@@ -163,22 +181,24 @@ class Session(private val svc: VoiceService) {
         }
     }
 
-    /** 选一行上屏；还在识别的行先结束录音，定稿后自动上屏 */
-    fun choose(i: Int) {
+    /** 选一行上屏，send 时随后点发送；还在识别的行先结束录音，定稿后自动上屏 */
+    fun choose(i: Int, send: Boolean = false) {
         val r = rows.getOrNull(i) ?: return
         sel = i
         userPicked = true
         when (r.state) {
             State.Listen, State.Wait -> {
                 choosePending = true
+                chooseSend = send
                 end()
                 svc.onSessionChanged()
             }
             State.Final -> {
                 App.prefs.lastPick = r.ch
+                if (picking) App.prefs.countPick(r.ch)
                 val node = target
                 close()
-                Inject.insert(svc, node, r.text)
+                if (Inject.insert(svc, node, r.text) && send) svc.send(node)
             }
             State.Error -> svc.onSessionChanged()
         }
@@ -196,8 +216,18 @@ class Session(private val svc: VoiceService) {
     }
 
     fun abort(message: String?) {
+        val row = if (picking) rows.getOrNull(sel) else rows.firstOrNull()
+        val keep = if (message != null && row != null && row.state != State.Error) row.text.takeIf { it.isNotEmpty() } else null
+        val t = typer
+        val node = target
+        val already = typed
         close()
-        message?.let(svc.hud::error)
+        if (keep != null) {
+            if (t?.update(keep) != true && !already) Inject.insert(svc, node, keep)
+            svc.hud.info("$message，已保留已识别的文字")
+        } else {
+            message?.let(svc.hud::error)
+        }
     }
 
     private fun close() {

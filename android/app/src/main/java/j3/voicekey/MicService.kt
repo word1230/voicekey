@@ -25,7 +25,7 @@ class MicService : Service() {
         val n = Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_mic)
             .setContentTitle("VoiceKey 待命中")
-            .setContentText("长按音量下键或悬浮球说话")
+            .setContentText("长按${App.prefs.holdName}或悬浮球说话")
             .setContentIntent(open)
             .setOngoing(true)
             .build()

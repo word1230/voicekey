@@ -12,10 +12,12 @@ import android.os.Handler
 import android.os.Looper
 import android.text.TextUtils
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.core.widget.NestedScrollView
 
 /** 屏幕顶部浮层：单渠道显示实时文字，多渠道显示候选列表（可点） */
 @SuppressLint("SetTextI18n")
@@ -28,6 +30,8 @@ class Hud(private val svc: VoiceService) {
     private val wave = Wave(svc)
     private val body = label(16f, WHITE).apply { maxLines = 6; ellipsize = TextUtils.TruncateAt.START }
     private val list = LinearLayout(svc).apply { orientation = LinearLayout.VERTICAL }
+    /** 候选太多时整个列表可滚 */
+    private val listBox = Capped(svc).apply { addView(list) }
     private val root = LinearLayout(svc).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(px(16), px(12), px(16), px(14))
@@ -38,7 +42,7 @@ class Hud(private val svc: VoiceService) {
             addView(wave, LinearLayout.LayoutParams(px(64), px(20)))
         })
         addView(body, LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(6) })
-        addView(list, LinearLayout.LayoutParams(-1, -2))
+        addView(listBox, LinearLayout.LayoutParams(-1, -2))
     }
     private val lp = WindowManager.LayoutParams(
         0, WindowManager.LayoutParams.WRAP_CONTENT,
@@ -69,7 +73,15 @@ class Hud(private val svc: VoiceService) {
             body.text = r.text.ifEmpty { if (s.recording) "请说话…" else "…" }
             list.removeAllViews()
         } else {
-            title.text = if (s.recording) "多渠道 · 聆听中，点一条结束并上屏" else "点一条上屏 · 音量下键上屏高亮 · 音量上键切换"
+            val send = App.prefs.pickSend
+            title.text = when {
+                s.recording && send -> "多渠道 · 聆听中，点一条发送，长按上屏编辑"
+                s.recording -> "多渠道 · 聆听中，点一条结束并上屏"
+                send -> "点一条发送 · 长按上屏编辑"
+                else -> App.prefs.let { p ->
+                    "点一条上屏 · ${p.holdName}上屏高亮" + if (KeyEvent.KEYCODE_VOLUME_UP in p.holdKeys) "" else " · 音量上键切换"
+                }
+            }
             body.visibility = View.GONE
             rows(s)
         }
@@ -79,13 +91,27 @@ class Hud(private val svc: VoiceService) {
     private fun rows(s: Session) {
         if (list.childCount != s.rows.size + 1) {
             list.removeAllViews()
+            // 每条候选内部可滚：2 路最多 8 行、3 路 5 行、更多 4 行，长文本不把后面的候选挤出屏幕
+            val lines = when (s.rows.size) { 2 -> 8; 3 -> 5; else -> 4 }
+            listBox.max = svc.resources.displayMetrics.heightPixels * 3 / 5
             s.rows.indices.forEach { i ->
+                val pick = View.OnClickListener { svc.session.choose(i, App.prefs.pickSend) }
+                val edit = View.OnLongClickListener { svc.session.choose(i); true }
+                val text = label(15f, WHITE).apply {
+                    setOnClickListener(pick)
+                    setOnLongClickListener(edit)
+                }
                 list.addView(LinearLayout(svc).apply {
                     orientation = LinearLayout.VERTICAL
                     setPadding(px(10), px(8), px(10), px(8))
                     addView(label(12f, DIM))
-                    addView(label(15f, WHITE).apply { maxLines = 3; ellipsize = TextUtils.TruncateAt.START })
-                    setOnClickListener { svc.session.choose(i) }
+                    addView(Capped(svc).apply {
+                        max = text.lineHeight * lines
+                        isVerticalScrollBarEnabled = true
+                        addView(text)
+                    })
+                    setOnClickListener(pick)
+                    setOnLongClickListener(edit)
                 }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(4) })
             }
             list.addView(label(14f, DIM).apply {
@@ -104,9 +130,18 @@ class Hud(private val svc: VoiceService) {
                 Session.State.Error -> " · 失败"
             }
             (v.getChildAt(0) as TextView).text = "${i + 1}  ${r.ch.short}$state"
-            (v.getChildAt(1) as TextView).apply {
-                text = r.text.ifEmpty { "…" }
-                setTextColor(if (r.state == Session.State.Error) DIM else WHITE)
+            val box = v.getChildAt(1) as Capped
+            val t = box.getChildAt(0) as TextView
+            val live = r.state == Session.State.Listen || r.state == Session.State.Wait
+            // 识别中贴底跟随最新文字（用户往上翻了就不打扰）；定稿后回到开头方便从头看
+            val follow = live && !box.canScrollVertically(1)
+            val settled = !live && box.tag != r.state
+            box.tag = r.state
+            t.text = r.text.ifEmpty { "…" }
+            t.setTextColor(if (r.state == Session.State.Error) DIM else WHITE)
+            if (follow || settled) {
+                box.stick = if (follow) 1 else -1
+                box.requestLayout()
             }
             v.background = if (i == s.sel) GradientDrawable().apply { cornerRadius = 12 * dp; setColor(SEL) } else null
         }
@@ -141,6 +176,26 @@ class Hud(private val svc: VoiceService) {
         main.removeCallbacks(hideRun)
         if (attached) wm.removeView(root)
         attached = false
+    }
+
+    /** 限高的滚动容器；stick 在下次布局后贴底（1）或回顶（-1） */
+    private class Capped(ctx: Context) : NestedScrollView(ctx) {
+        var max = (1 shl 30) - 1
+        var stick = 0
+
+        override fun onMeasure(w: Int, h: Int) {
+            val limit = if (MeasureSpec.getMode(h) == MeasureSpec.UNSPECIFIED) max else minOf(max, MeasureSpec.getSize(h))
+            super.onMeasure(w, MeasureSpec.makeMeasureSpec(limit, MeasureSpec.AT_MOST))
+        }
+
+        override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+            super.onLayout(changed, l, t, r, b)
+            when (stick) {
+                1 -> scrollTo(0, getChildAt(0)?.height ?: 0)
+                -1 -> scrollTo(0, 0)
+            }
+            stick = 0
+        }
     }
 
     private class Wave(ctx: Context) : View(ctx) {
