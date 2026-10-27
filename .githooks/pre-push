@@ -1,5 +1,5 @@
 #!/bin/sh
-# 推送前：完整测试套件（crates 全部单测 + 应用层）。急着推时用 git push --no-verify。
+# 推送前：--fast 的全部 + cargo test --workspace。急着推时用 git push --no-verify。
 set -e
 cd "$(git rev-parse --show-toplevel)"
-cargo test --workspace
+exec Scripts/check.sh --full

@@ -1,6 +1,7 @@
 name: check
 
 # 本机 .githooks/ 那两道钩子的兜底：钩子可以 --no-verify 跳过，这里不行。
+# 检查条目只有一份：Scripts/check.sh（钩子与 CI 都调它）。
 on:
   push:
     branches: [main]
@@ -16,11 +17,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
-            librsvg2-dev patchelf libgtk-3-dev cmake
+            librsvg2-dev patchelf libgtk-3-dev cmake shellcheck
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-targets
-      - run: cargo test --workspace
-
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -29,7 +27,5 @@ jobs:
       # opus 走 .cargo/config.toml 的 LIBOPUS_NO_PKG，从源码静态编译，不需要 libopus
       - run: npm ci
         working-directory: app
-      - run: npm run check
-        working-directory: app
-      - run: npm test
-        working-directory: app
+      - name: 仓库检查（与本地钩子同一入口）
+        run: ./Scripts/check.sh --full
