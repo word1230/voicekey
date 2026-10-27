@@ -76,6 +76,8 @@ pub struct Settings {
     pub streaming: bool,
     pub live_text: bool,
     pub mic: String,
+    /// 录音时静音系统输出（Linux：pactl / wpctl），结束后恢复原状
+    pub mute_while_recording: bool,
     /// 多渠道模式下同时识别的渠道（至少 2 个）
     pub multi: Vec<Channel>,
     /// 候选框上次选中的渠道，下次默认聚焦
@@ -103,6 +105,7 @@ impl Default for Settings {
             streaming: true,
             live_text: true,
             mic: String::new(),
+            mute_while_recording: false,
             multi: Channel::engines().into_iter().filter(|&c| c != Channel::WetypeOffline).collect(),
             last_pick: None,
             autostart: false,

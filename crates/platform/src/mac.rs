@@ -357,6 +357,17 @@ pub fn front_app() -> Option<FrontApp> {
     Some(FrontApp(app.processIdentifier()))
 }
 
+// MARK: - 系统输出静音
+
+/// 「录音时静音系统」当前只在 Linux 实现（pactl / wpctl，见 `linux.rs`）。
+/// 接口先在 macOS 占位，静音不生效；实现时 CoreAudio 的
+/// `kAudioDevicePropertyMute` 即可，记得让 [`set_output_muted`] 真做事。
+pub fn mute_output_start() -> crate::OutputMute {
+    crate::OutputMute::from_restore(None)
+}
+
+pub(crate) fn set_output_muted(_mute: bool) {}
+
 impl FrontApp {
     pub fn activate(&self) {
         use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};

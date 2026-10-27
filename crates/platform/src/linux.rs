@@ -343,6 +343,56 @@ pub fn secure_input() -> bool {
     false
 }
 
+// MARK: - 系统输出静音
+
+/// 「录音时静音系统」：把默认输出（扬声器）静音，原状态记进返回的 [`crate::OutputMute`]，
+/// Drop 时恢复。识别音频本来只从麦克风来（cpal 只开输入设备），这条管的是别打扰人——
+/// 说话这会儿放着的歌、会议声先停一停。
+///
+/// 走 pactl（PulseAudio 与 PipeWire 的 pipewire-pulse 都提供），没有再试 wpctl。
+pub fn mute_output_start() -> crate::OutputMute {
+    crate::OutputMute::from_restore(sink_muted().map(|orig| {
+        set_output_muted(true);
+        orig
+    }))
+}
+
+/// 默认输出的当前静音状态；工具缺失或查询失败时 None——那样就不静音
+fn sink_muted() -> Option<bool> {
+    if let Some(out) = run("pactl", &["get-sink-mute", "@DEFAULT_SINK@"]) {
+        if let Some(m) = pactl_mute(&out) {
+            return Some(m);
+        }
+    }
+    wpctl_muted(&run("wpctl", &["get-volume", "@DEFAULT_AUDIO_SINK@"])?)
+}
+
+pub(crate) fn set_output_muted(mute: bool) {
+    let v = if mute { "1" } else { "0" };
+    if run("pactl", &["set-sink-mute", "@DEFAULT_SINK@", v]).is_none() {
+        run("wpctl", &["set-mute", "@DEFAULT_AUDIO_SINK@", v]);
+    }
+}
+
+fn run(cmd: &str, args: &[&str]) -> Option<String> {
+    let out = Command::new(cmd).args(args).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// `pactl get-sink-mute` 的输出，如 `Mute: no`
+fn pactl_mute(out: &str) -> Option<bool> {
+    match out.rsplit(':').next()?.trim() {
+        "yes" => Some(true),
+        "no" => Some(false),
+        _ => None,
+    }
+}
+
+/// `wpctl get-volume` 的输出，如 `Volume: 0.45` / `Volume: 0.45 [MUTED]`
+fn wpctl_muted(out: &str) -> Option<bool> {
+    Some(out.contains("[MUTED]"))
+}
+
 // MARK: - 权限（Linux 无需系统授权）
 
 pub mod perm {
@@ -357,6 +407,37 @@ pub mod perm {
     pub fn request_mic() {}
     pub fn open_accessibility() {}
     pub fn open_mic() {}
+}
+
+#[cfg(test)]
+mod mute_tests {
+    use super::*;
+
+    #[test]
+    fn pactl_mute_parses_yes_no_and_rejects_garbage() {
+        assert_eq!(pactl_mute("Mute: no\n"), Some(false));
+        assert_eq!(pactl_mute("Mute: yes\n"), Some(true));
+        assert_eq!(pactl_mute("没有输出设备\n"), None);
+    }
+
+    #[test]
+    fn wpctl_muted_flags_bracketed_marker() {
+        assert_eq!(wpctl_muted("Volume: 0.45\n"), Some(false));
+        assert_eq!(wpctl_muted("Volume: 0.45 [MUTED]\n"), Some(true));
+    }
+
+    /// 本机真实验收：静音一瞬再还原（docs/linux.md「录音时静音系统」）。
+    /// 需要声音服务在跑，`cargo test -p voicekey-platform -- --ignored` 显式跑。
+    #[test]
+    #[ignore = "需要本机声音服务"]
+    fn mute_round_trip_mutes_then_restores_previous_state() {
+        let before = sink_muted();
+        let guard = mute_output_start();
+        assert!(guard.active());
+        assert_eq!(sink_muted(), Some(true));
+        drop(guard);
+        assert_eq!(sink_muted(), before);
+    }
 }
 
 // MARK: - 键码映射

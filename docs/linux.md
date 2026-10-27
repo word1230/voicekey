@@ -104,6 +104,23 @@ Linux 侧的机制：
 | 全局按键 | evdev 读 `/dev/input/event*`（多读不独占） |
 | 上屏 | `/dev/uinput` 虚拟键盘 + 剪贴板（`wl-copy` / `xclip`）+ Ctrl+V |
 | 光标位置、前台应用 | 恒 `None`（Wayland 无全局 API） |
+| 系统输出静音 | `pactl`（PulseAudio 与 pipewire-pulse 都提供）/ `wpctl` 兜底 |
+
+### 录音时静音系统
+
+「音频」页的开关（`muteWhileRecording`）。开麦那一刻把默认输出静音，收麦恢复原状——
+原状态是开麦时问出来的（`pactl get-sink-mute`，没有再试 `wpctl get-volume`），
+**问不出原状态就不静音**：恢复不了的事不能做一半，开关表现为无效但不报错。
+识别音频始终只从麦克风来（cpal 只开输入设备），这条管的是别打扰人。
+
+实现落在 `platform::OutputMute`：恢复挂在 guard 的 `Drop` 上，打断、超时这些收尾
+路径不用各自记得恢复，controller 在 `stop_recording()` / `disarm()` 把 guard 一丢即可。
+
+验收：
+
+- 开着音乐按住长按键 → 音乐立刻停；松手 → 音乐回来。
+- 事先把系统静音再录音 → 松手后**仍是静音**（恢复的是原状，不是一律取消静音）。
+- `pactl` / `wpctl` 都不在（或连不上声音服务）→ 开录音不报错、系统也不被静音。
 
 ## 吞键差异
 
@@ -785,6 +802,11 @@ XDG_DATA_HOME=/tmp/vksb ./target/debug/voicekey   # dirs::data_dir() 认这个�
     `app` 里 `npm run check` 101 文件 0 错 0 警、`npm test` 全过
   - **没做的**：真人对着麦克风说一句（对照清单第 7 步）——这一步只能由人完成；
     "全部渠道"模式的 pick 面板本轮没再复验（#5 已验过，与本票无关）。
+
+- **录音时静音系统（2026-10-25）**：`mute_round_trip_mutes_then_restores_previous_state`（标
+  `#[ignore]`，`cargo test -p voicekey-platform -- --ignored` 显式跑）在本机过：guard 生效期间
+  `pactl get-sink-mute` 为 yes，Drop 后回到原状态；先手动把系统静音再跑一轮，结束仍是静音
+  （恢复原状，不是一律取消静音），跑完手动还原。pactl 解析有单测覆盖（`yes`/`no`/垃圾输出）。
 
 ### Arch + niri（历史，[ADR 0001](adr/0001-linux-targets-kwin-wayland.md) 之后不再代表当前环境）
 

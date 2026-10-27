@@ -197,6 +197,14 @@ pub fn secure_input() -> bool {
     false
 }
 
+/// 「录音时静音系统」当前只在 Linux 实现（pactl / wpctl，见 `linux.rs`）；Windows 侧
+/// 实现时走 `IAudioEndpointVolume::SetMute`。先占位，静音不生效。
+pub fn mute_output_start() -> crate::OutputMute {
+    crate::OutputMute::from_restore(None)
+}
+
+pub(crate) fn set_output_muted(_mute: bool) {}
+
 impl FrontApp {
     pub fn activate(&self) {
         unsafe {

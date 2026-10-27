@@ -13,7 +13,9 @@ mod win;
 #[cfg(windows)]
 use win as imp;
 
-pub use imp::{caret, front_app, inject_device, inject_key, paste, secure_input, start_hook, FrontApp};
+pub use imp::{
+    caret, front_app, inject_device, inject_key, mute_output_start, paste, secure_input, start_hook, FrontApp,
+};
 
 /// 浮层几何：给定工作区与浮层尺寸算落点，应用与 KWin 规则生成共用
 pub mod overlay;
@@ -127,6 +129,34 @@ pub enum MicStatus {
 /// 系统权限（Windows 无需授权，恒为已授权）
 pub mod perm {
     pub use crate::imp::perm::*;
+}
+
+/// 「录音时静音系统」：开麦时把系统输出静音，收麦时恢复原来的静音状态。
+/// 恢复挂在 [`Drop`] 上——打断、超时这些收尾路径不用各自记得恢复，guard 一丢就还原。
+/// 平台未实现（Linux 上是 pactl / wpctl 都问不出原状态）时静音不生效：
+/// 恢复不了的事不能做一半，guard 整个生命周期都是无操作。
+pub struct OutputMute {
+    /// Some(原静音状态)：静音生效中；None：未生效
+    restore: Option<bool>,
+}
+
+impl OutputMute {
+    pub(crate) fn from_restore(restore: Option<bool>) -> Self {
+        Self { restore }
+    }
+
+    /// 静音是否真的生效了
+    pub fn active(&self) -> bool {
+        self.restore.is_some()
+    }
+}
+
+impl Drop for OutputMute {
+    fn drop(&mut self) {
+        if let Some(m) = self.restore.take() {
+            imp::set_output_muted(m);
+        }
+    }
 }
 
 /// 边说边上屏：与已打出的文本比对，退格删掉分歧部分再补打新内容（不经剪贴板）

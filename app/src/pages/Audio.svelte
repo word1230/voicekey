@@ -34,6 +34,10 @@
     </select>
   </div>
   <div class="row">
+    <div class="lbl">录音时静音系统<small>按下快捷键开始说话时静音系统输出，结束后恢复；识别始终只从上面的麦克风读取</small></div>
+    <button class="sw" class:on={s.muteWhileRecording} onclick={() => save({ muteWhileRecording: !s.muteWhileRecording })} aria-label="录音时静音系统"></button>
+  </div>
+  <div class="row">
     <div class="lbl">输入电平<small>对着麦克风说话测试</small></div>
     <Meter />
   </div>

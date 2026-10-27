@@ -150,6 +150,8 @@ pub struct Ctl {
     flush_pending: bool,
     /// 按下到判定长按之间已经打开的麦克风，确认开始后把这段音频交出去
     primed: Option<Primed>,
+    /// 「录音时静音系统」的 guard：开麦时挂上，收麦时丢掉（Drop 里恢复原状）
+    output_mute: Option<pf::OutputMute>,
 }
 
 /// 预开麦：先环形缓存，确认录音后转成实时帧流
@@ -208,6 +210,7 @@ pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) 
         last_emit: Instant::now(),
         flush_pending: false,
         primed: None,
+        output_mute: None,
     };
     tauri::async_runtime::spawn(ctl.run(rx));
 }
@@ -353,6 +356,14 @@ impl Ctl {
         }
     }
 
+    /// 「录音时静音系统」：开麦那一刻把系统输出静音，收麦时恢复原状。
+    /// 预开麦（`arm`）时来过一次就不再重复问，原状态以第一次为准。
+    fn mute_output(&mut self) {
+        if self.settings().mute_while_recording && self.output_mute.is_none() {
+            self.output_mute = Some(pf::mute_output_start());
+        }
+    }
+
     fn start_recorder(&mut self) -> Option<voicekey_core::Audio> {
         self.meter = None;
         if let Some(audio) = self.take_primed() {
@@ -364,6 +375,7 @@ impl Ctl {
             let _ = tx.send(Msg::Level(v));
         }) {
             Ok((r, audio)) => {
+                self.mute_output();
                 self.recorder = Some(r);
                 self.recording = true;
                 self.heard_voice = false;
@@ -395,6 +407,7 @@ impl Ctl {
             }
             return;
         };
+        self.mute_output();
         let gate = Arc::new(Mutex::new(Gate::Buffer(VecDeque::new())));
         let shared = gate.clone();
         tauri::async_runtime::spawn(async move {
@@ -423,6 +436,7 @@ impl Ctl {
             return;
         }
         self.primed = None;
+        self.output_mute = None;
         if self.mode == Mode::Idle {
             self.refresh_meter();
         }
@@ -458,6 +472,7 @@ impl Ctl {
         if let Some(mut r) = self.recorder.take() {
             r.stop();
         }
+        self.output_mute = None;
         ui::set_tray_active(&self.app, false);
     }
 
