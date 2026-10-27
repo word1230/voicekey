@@ -5,6 +5,7 @@
 - 共享代码放 `crates/`：`app/src-tauri` 是纯 bin（没有 `[lib]`），别的 crate 依赖不了它。要对外暴露 CLI，照 `crates/core/src/bin/vk-test.rs` 的先例。
 - `crates/platform/src/{mac,win,linux}.rs` 三平台接口同步，以 `mac.rs` 为准。
 - Linux 平台层、本机验收手法（含「macOS / Windows 仍能编译」这类 AC 在本机能验到哪）：`docs/linux.md`。浮层目标已锁定 KWin Wayland（`docs/adr/0001-*`）。
+- 上游同步（`sourcecode/` 是 J3n5en/voicekey 的克隆）：`docs/upstream-sync.md`——merge 不 rebase，冲突与版本策略都在里面。
 - 提交与推送会跑 `.githooks/` 里的检查（提交：cargo check 无警告 + 前端 `npm run check` 类型检查与单测；推送：全量测试）。跳过用 `--no-verify`。
 
 ## Agent skills

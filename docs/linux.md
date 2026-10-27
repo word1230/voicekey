@@ -1,6 +1,6 @@
 # Linux 桌面版
 
-`crates/platform` 的 Linux 实现：用内核原语（evdev / uinput）替代 CGEventTap 与 WH_KEYBOARD_LL，因而不依赖合成器 API，X11 与 Wayland 通用。目前的目标环境是 KDE Plasma 6.8 / KWin 6.8（Wayland，[ADR 0001](adr/0001-linux-targets-kwin-wayland.md)）；早先在 Arch + niri（Wayland）跑通并打包的记录见文末，已不代表当前环境。
+`crates/platform` 的 Linux 实现：用内核原语（evdev / uinput）替代 CGEventTap 与 WH_KEYBOARD_LL，因而不依赖合成器 API，X11 与 Wayland 通用。目前的目标环境是 KDE Plasma 6.8 / KWin 6.8（Wayland，[ADR 0001](adr/0001-linux-targets-kwin-wayland.md)）；早先在 Arch + niri（Wayland）跑通并打包的记录见文末，已不代表当前环境。本机验收跑在 **x86_64 Arch** 上；ARM 构建与验收需在 ARM 目标机执行（AppImage 只按当前架构构建）。
 
 ## 跑起来
 
@@ -14,6 +14,10 @@ npx tauri build --bundles appimage,deb    # 打包
 ```
 
 完成判据：打包产物出现在 `target/release/bundle/{appimage,deb}/`。
+
+**fork 打包**：`app/src-tauri/tauri.conf.json` 的 updater endpoint 仍指向上游
+`J3n5en/voicekey`。自己发布 fork 构建前改掉或关掉，否则应用内“检查更新”会拉上游的包。
+AppImage 按当前架构命名（x86_64 是 `amd64`，ARM 是 `aarch64`），要出 ARM 包就在 ARM 机器上跑同一条命令。
 
 **Gotcha — npm**：全局设了 `allow-remote = none` 时（本机如此），而 lockfile 指向 `registry.npmmirror.com`，`npm ci` 报 `EALLOWREMOTE`。用 `--allow-remote=all` 覆盖。
 
@@ -493,11 +497,16 @@ KEY_ENTER」判断是不是键盘）。建设备后等 3 秒——应用的钩�
 应用**，原因见「[合成按键](#合成按键--uinput-注入)」第 2 条坑）：
 
 ```
-pkill -x voicekey → 起靶子 → 起应用（XDG_DATA_HOME=沙箱）→ sleep 5（让钩子扫到设备）
+停掉沙箱实例（检测到真实实例会拒绝运行）→ 起靶子 → 起应用（XDG_DATA_HOME=沙箱）
+→ sleep 5（让钩子扫到设备）→ 用 KWin 脚本激活靶子并确认 active=true（确认不了就拒绝注入）
 → 起注入脚本（它自己 sleep 3 再按下右 Alt：等钩子认领新设备）
 → paplay 那段 wav → 等它播完 + 1 秒 → 让注入脚本松开右 Alt → sleep 10
 → 看靶子日志，算"按住多久 / 松手到落字"
 ```
+
+脚本不会杀你正在用的 VoiceKey：它只停 `XDG_DATA_HOME` 指向沙箱的实例，看到真实实例
+（比如开机自启的那个）会直接退出。靶子焦点也不用再手动激活——脚本会用 KWin 脚本激活并
+从 `vk-kwin dump` 确认，确认不了就拒绝注入，免得字落进别的窗口。
 
 那个 `sleep 3` 在**按下之前**，不在按下与播放之间——它等的是"钩子扫到刚建的 uinput 设备"
 （见下面第 4 条坑）。所以实测的按住时长就是 `4.6s（wav）+ 1s ≈ 5.7s`，而不是 3+4.6+1。
