@@ -167,6 +167,19 @@ pub fn failures(vs: &[Verdict], require_overlays: bool) -> Vec<&Verdict> {
         .collect()
 }
 
+/// 打印用标签，以及「这条是 required 却跳过了」的标记。
+///
+/// `--require-overlays` 下被计入失败的 Skip 也显示成 FAIL：摘要会说「上面带 FAIL 的就是」，
+/// 不能让人去找一行不存在的 FAIL。
+pub fn label(v: &Verdict, require_overlays: bool) -> (&'static str, bool) {
+    match v.outcome {
+        Outcome::Pass => ("ok", false),
+        Outcome::Fail => ("FAIL", false),
+        Outcome::Skip if require_overlays => ("FAIL", true),
+        Outcome::Skip => ("skip", false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +309,8 @@ mod tests {
         assert_eq!(vs[0].outcome, Outcome::Skip);
         assert!(failures(&vs, false).is_empty(), "默认不该因此退非零");
         assert_eq!(failures(&vs, true).len(), 1, "--require-overlays 时要算失败");
+        // 摘要说「上面带 FAIL 的就是」，所以 required 的 skip 必须真的显示成 FAIL
+        assert_eq!(label(&vs[0], false), ("skip", false));
+        assert_eq!(label(&vs[0], true), ("FAIL", true));
     }
 }

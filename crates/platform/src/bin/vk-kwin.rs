@@ -119,7 +119,7 @@ fn resolve_app_id(flag: Option<String>, p: &voicekey_platform::kwin::Probe) -> R
 #[cfg(target_os = "linux")]
 fn check(app_id_flag: Option<String>, require_overlays: bool) -> Result<(), String> {
     use voicekey_platform::kwin;
-    use voicekey_platform::kwin::check::{failures, overlay_verdicts, rules_verdicts, Expected, Outcome};
+    use voicekey_platform::kwin::check::{failures, label, overlay_verdicts, rules_verdicts, Expected, Outcome};
     use voicekey_platform::overlay::{bottom_center, HUD_BOTTOM_MARGIN, HUD_H, HUD_W, PICK_W};
 
     let p = kwin::probe()?;
@@ -144,10 +144,12 @@ fn check(app_id_flag: Option<String>, require_overlays: bool) -> Result<(), Stri
     vs.extend(overlay_verdicts(find(kwin::PICK_TITLE), &pick));
 
     for v in &vs {
-        match v.outcome {
-            Outcome::Pass => println!("  ok    {}", v.item),
-            Outcome::Fail => println!("  FAIL  {} —— {}", v.item, v.why),
-            Outcome::Skip => println!("  skip  {} —— {}", v.item, v.why),
+        let (tag, required) = label(v, require_overlays);
+        if v.outcome == Outcome::Pass {
+            println!("  {tag:<4}  {}", v.item);
+        } else {
+            let note = if required { "（--require-overlays 要求验到）" } else { "" };
+            println!("  {tag:<4}  {} —— {}{note}", v.item, v.why);
         }
     }
     let count = |o: Outcome| vs.iter().filter(|v| v.outcome == o).count();
