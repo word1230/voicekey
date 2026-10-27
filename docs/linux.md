@@ -808,6 +808,31 @@ XDG_DATA_HOME=/tmp/vksb ./target/debug/voicekey   # dirs::data_dir() 认这个�
   `pactl get-sink-mute` 为 yes，Drop 后回到原状态；先手动把系统静音再跑一轮，结束仍是静音
   （恢复原状，不是一律取消静音），跑完手动还原。pactl 解析有单测覆盖（`yes`/`no`/垃圾输出）。
 
+- **上游 v1.7.0 同步（2026-10-27）**：把 `J3n5en/voicekey` 的 10 个提交（v1.5.0–v1.7.0）合进
+  fork。共同祖先 `ea0b425`；只有三处文本冲突（`Cargo.lock`、`ui.rs`、`Onboard.svelte`），
+  加上「录音时静音系统」那个提交后多一处 `api.ts`。上游**没有碰** `crates/platform`，
+  Linux 平台层原样保留。
+  - 合并后 `cargo check --workspace --all-targets` 无警告、`cargo test --workspace` 全绿、
+    `npm run check` 101 文件 0 错 0 警、`npm test` 3/3；`cargo check -p voicekey-platform
+    --target x86_64-apple-darwin` 与 `--target x86_64-pc-windows-msvc` 均通过。
+  - 单渠道 `wetype` 沙箱端到端：HUD `620,936 680x120`（`layer=3`、`keepAbove=true`、
+    `wantsInput=false`），靶子日志 `CHANGED len=20 text='今天天气不错，我们下午一起去公园散步吧。'`，
+    松手到落字 1.89s（与既有记录同量级）。
+  - 自定义长按组合（`holdKey=custom`，左 Ctrl + 左 Alt，evdev 29/56）：HUD 正常弹出，
+    同一段 wav 落字一致；托盘菜单显示「长按 Ctrl+Alt 或点按 右 Ctrl 说话」。
+  - 「全部渠道」沙箱：pick 面板 `700,335 520x454`、`layer=3`、`active=false`，长结果未
+    panic（上游 35b5bd7 的 `clamp_axis` / `cap_len` 与本 fork 的 `Area::units` 改动合在一起）。
+  - 录音时静音：默认未静音 → 录音中 `Mute: yes` → 松手 `Mute: no`；先把 sink 静音再录一轮，
+    松手仍是 `Mute: yes`（恢复原状）。默认输出临时指向 `module-null-sink`，真实输出没被动过。
+  - 设置窗口截图确认 `v1.7.0`、Chatterfly 渠道在；`app/dist` 里含「录音时静音系统」与
+    「再点一次结束」文案。`vk-kwin check --require-overlays` 在 HUD / pick 映射期间分别跑过：
+    对应浮层的行为层全 ok，另一扇未映射的浮层按约定记 skip（`--require-overlays` 下算失败）。
+  - 全程 `XDG_DATA_HOME=/tmp/vk-e2e-sandbox`；`~/.local/share/VoiceKey/` 无新文件、mtime 未变。
+    虚拟声卡、默认输入/输出与模块用后还原并卸载。
+  - 顺手修 `Scripts/e2e/run_e2e.sh` 两处跑不起来的地方：`target.py` / `inject_hold.py` 改按
+    `$HERE` 定位（此前从仓库根跑必然找不到），`VK_SINK` 未设时不再被 `set -u` 打掉。
+    靶子焦点仍要按上文用 KWin 脚本激活，脚本没有代劳。
+
 ### Arch + niri（历史，[ADR 0001](adr/0001-linux-targets-kwin-wayland.md) 之后不再代表当前环境）
 
 - evdev 钩子 + uinput 注入闭环：注入的按键被钩子收到，修饰键状态正确

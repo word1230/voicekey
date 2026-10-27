@@ -9,7 +9,8 @@
 #       （python3 -m http.server 1420 -d app/dist）、Python 有 gi 与 evdev。
 # 每轮都重启应用：同一进程里同名 uinput 设备只被认领一次（见 docs/linux.md）。
 set -uo pipefail
-cd "$(dirname "$0")/../.."
+HERE="$(cd "$(dirname "$0")" && pwd)"
+cd "$HERE/../.."
 
 CH="${1:-wetype}"
 WORK="${2:-/tmp/vk-e2e}"
@@ -24,16 +25,20 @@ pkill -x voicekey 2>/dev/null; sleep 1
 rm -f "$WORK/target.log" "$WORK/inject.log" "$WORK/stop"
 
 # 靶子先起、拿焦点；应用后起（浮层不影响靶子焦点，但顺序固定更好复现）
-python3 target.py "$WORK/target.log" & echo $! > "$WORK/target.pid"
+python3 "$HERE/target.py" "$WORK/target.log" & echo $! > "$WORK/target.pid"
 sleep 2
 XDG_DATA_HOME="$SANDBOX" ./target/debug/voicekey > "$WORK/app.log" 2>&1 & echo $! > "$WORK/app.pid"
 sleep 5   # 让钩子扫到 /dev/input 里的设备
 
 # 注入脚本自己 sleep 3 再按下右 Alt（等钩子认领新设备）
-python3 inject_hold.py "$WORK/stop" > "$WORK/inject.log" 2>&1 & echo $! > "$WORK/inject.pid"
+python3 "$HERE/inject_hold.py" "$WORK/stop" > "$WORK/inject.log" 2>&1 & echo $! > "$WORK/inject.pid"
 # 与按下同时开始播：按下后要过 0.3s 长按阈值才开始录，wav 有 4.6s，足够
 sleep 3.5
-paplay --device="$VK_SINK" "$WAV" 2>/dev/null || paplay "$WAV"
+if [ -n "${VK_SINK:-}" ]; then
+    paplay --device="$VK_SINK" "$WAV" 2>/dev/null || paplay "$WAV"
+else
+    paplay "$WAV"
+fi
 
 # 播完再等 1 秒（把最后一句留足），然后松开
 touch "$WORK/stop"
