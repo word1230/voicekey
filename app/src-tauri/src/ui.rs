@@ -90,12 +90,35 @@ pub fn create_overlays<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     hud.set_ignore_cursor_events(true)?; // HUD 是纯显示，不该吃鼠标
     #[cfg(target_os = "linux")]
     hud_click_through(&hud); // Linux 上换一条路，见函数上的说明
-    let pick = overlay(app, "pick", PICK_W, 300.0)?;
-    #[cfg(target_os = "macos")]
-    panel::convert(&pick);
-    #[cfg(not(target_os = "macos"))]
-    let _ = pick;
+    // pick 面板改为按需创建（见 sync_pick）：仅多渠道模式常驻，其他模式销毁省内存
     Ok(())
+}
+
+/// 候选面板只在多渠道模式下常驻，其他模式销毁以释放 WebView 内存
+pub fn sync_pick<R: Runtime>(app: &AppHandle<R>, need: bool) {
+    match app.get_webview_window("pick") {
+        Some(w) if !need && !w.is_visible().unwrap_or(false) => {
+            destroy_pick(&w);
+        }
+        None if need => {
+            // 异步创建：同步命令里建窗口在 Windows 上会死锁
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let Ok(pick) = overlay(&app, "pick", PICK_W, 300.0) else { return };
+                #[cfg(target_os = "macos")]
+                panel::convert(&pick);
+                #[cfg(not(target_os = "macos"))]
+                let _ = pick;
+            });
+        }
+        _ => {}
+    }
+}
+
+fn destroy_pick<R: Runtime>(w: &WebviewWindow<R>) {
+    #[cfg(target_os = "macos")]
+    panel::restore(w);
+    let _ = w.destroy();
 }
 
 pub fn show_settings<R: Runtime>(app: &AppHandle<R>) {
@@ -289,8 +312,12 @@ pub fn pick_resize<R: Runtime>(app: &AppHandle<R>, height: f64) {
 }
 
 pub fn pick_hide<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(w) = app.get_webview_window("pick") {
+    let Some(w) = app.get_webview_window("pick") else { return };
+    // 挑选途中切走了多渠道：收起即销毁
+    if current_channel(app) == Channel::All {
         let _ = w.hide();
+    } else {
+        destroy_pick(&w);
     }
 }
 
@@ -351,6 +378,7 @@ pub fn refresh_tray<R: Runtime>(app: &AppHandle<R>, s: &Settings, paused: bool) 
     }
 }
 
+/// 录音中把托盘图标换成高亮态（fork 保留；上游 v1.10 起托盘不再区分录音态）
 pub fn set_tray_active<R: Runtime>(app: &AppHandle<R>, active: bool) {
     if !cfg!(target_os = "macos") {
         return;
@@ -367,10 +395,12 @@ pub fn set_tray_active<R: Runtime>(app: &AppHandle<R>, active: bool) {
 mod panel {
     use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
     use objc2::{msg_send, sel};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tauri::{Runtime, WebviewWindow};
 
     pub static KEYABLE: AtomicBool = AtomicBool::new(false);
+    /// 换类前的原始 isa（WebKit 已在其上注册 KVO），销毁前必须换回，否则移除观察者抛 NSException 闪退
+    static ORIGINAL: AtomicUsize = AtomicUsize::new(0);
     const NONACTIVATING: usize = 1 << 7;
 
     extern "C" {
@@ -402,12 +432,24 @@ mod panel {
         let ptr = ptr as usize;
         let _ = w.run_on_main_thread(move || unsafe {
             let obj = ptr as *mut AnyObject;
-            object_setClass(obj, class());
+            ORIGINAL.store(object_setClass(obj, class()) as usize, Ordering::Relaxed);
             let o = &*obj;
             let mask: usize = msg_send![o, styleMask];
             let _: () = msg_send![o, setStyleMask: mask | NONACTIVATING];
             let _: () = msg_send![o, setHidesOnDeactivate: Bool::NO];
             let _: () = msg_send![o, setHasShadow: Bool::NO];
+        });
+    }
+
+    /// destroy 走事件循环代理，排在本任务之后执行
+    pub fn restore<R: Runtime>(w: &WebviewWindow<R>) {
+        let Ok(ptr) = w.ns_window() else { return };
+        let ptr = ptr as usize;
+        let _ = w.run_on_main_thread(move || unsafe {
+            let cls = ORIGINAL.swap(0, Ordering::Relaxed);
+            if cls != 0 {
+                object_setClass(ptr as *mut AnyObject, cls as *const AnyClass);
+            }
         });
     }
 }

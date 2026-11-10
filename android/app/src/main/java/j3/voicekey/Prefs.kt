@@ -2,6 +2,7 @@ package j3.voicekey
 
 import android.content.Context
 import android.content.SharedPreferences
+import org.json.JSONObject
 
 class Prefs(ctx: Context) {
     val sp: SharedPreferences = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
@@ -28,6 +29,66 @@ class Prefs(ctx: Context) {
 
     fun countPick(ch: Channel) = sp.edit().putInt("pickCount.${ch.id}", pickCount(ch) + 1).apply()
 
+    /** Jev 智能选择：off / official / yce，仅多渠道模式生效 */
+    var jevMode: String
+        get() = sp.getString("jevMode", "off") ?: "off"
+        set(v) = sp.edit().putString("jevMode", v).apply()
+
+    var jevKey: String
+        get() = sp.getString("jevKey", "") ?: ""
+        set(v) = sp.edit().putString("jevKey", v).apply()
+
+    var jevEndpoint: String
+        get() = sp.getString("jevEndpoint", "") ?: ""
+        set(v) = sp.edit().putString("jevEndpoint", v).apply()
+
+    var jevModel: String
+        get() = sp.getString("jevModel", "") ?: ""
+        set(v) = sp.edit().putString("jevModel", v).apply()
+
+    /** 自定义格式（内部值仍为 yce）：每行 alias|key|endpoint */
+    var jevPool: String
+        get() = sp.getString("jevPool", "") ?: ""
+        set(v) = sp.edit().putString("jevPool", v).apply()
+
+    var jevSelectionThreshold: JevSelectionThreshold
+        get() = JevSelectionThreshold.of(sp.getString("jevSelectionThreshold", null))
+        set(v) = sp.edit().putString("jevSelectionThreshold", v.id).apply()
+
+    var jevSelectionWaitMs: Int
+        get() = JevSelectionTiming.clampWait(sp.getInt("jevSelectionWaitMs", JevSelectionTiming.DEFAULT_WAIT_MS))
+        set(v) = sp.edit().putInt("jevSelectionWaitMs", JevSelectionTiming.clampWait(v)).apply()
+
+    fun jevSelectionTiming() = JevSelectionTiming(jevSelectionThreshold, jevSelectionWaitMs)
+
+    /**
+     * 只恢复选择时机，不修改模式、密钥及其他 Jev 设置。
+     *
+     * Restore only selection timing, leaving the mode, credentials, and other Jev settings untouched.
+     */
+    fun resetJevSelectionTiming() {
+        sp.edit()
+            .putString("jevSelectionThreshold", JevSelectionThreshold.TwoThirds.id)
+            .putInt("jevSelectionWaitMs", JevSelectionTiming.DEFAULT_WAIT_MS)
+            .apply()
+    }
+
+    /**
+     * core jev::Config 的 camelCase JSON；会话传入录音快照，设置页默认使用当前选择时机。
+     *
+     * Produce camelCase JSON for core jev::Config. Sessions supply a recording snapshot;
+     * the settings screen defaults to the current selection timing.
+     */
+    fun jevConfig(timing: JevSelectionTiming = jevSelectionTiming()): String = JSONObject()
+        .put("mode", jevMode)
+        .put("key", jevKey)
+        .put("endpoint", jevEndpoint)
+        .put("model", jevModel)
+        .put("pool", jevPool)
+        .put("selectionThreshold", timing.threshold.id)
+        .put("selectionWaitMs", timing.waitMs)
+        .toString()
+
     /** 点按说话时静音多少秒自动结束 */
     var silence: Float
         get() = sp.getFloat("silence", 1.5f).coerceIn(1f, 5f)
@@ -42,10 +103,15 @@ class Prefs(ctx: Context) {
         get() = sp.getBoolean("streaming", true)
         set(v) = sp.edit().putBoolean("streaming", v).apply()
 
-    /** 多渠道候选：点一条上屏并发送，长按只上屏 */
+    /** 多渠道候选：点一条上屏并发送，长按只上屏；旧的 Jev 自动发送开关已合并到本开关（未写过 pickSend 时回退读旧值） */
     var pickSend: Boolean
-        get() = sp.getBoolean("pickSend", false)
+        get() = if (sp.contains("pickSend")) sp.getBoolean("pickSend", false) else sp.getBoolean("jevSend", false)
         set(v) = sp.edit().putBoolean("pickSend", v).apply()
+
+    /** 上次自动检查更新的时间（毫秒），用于 12 小时节流 */
+    var updateCheckedAt: Long
+        get() = sp.getLong("updateCheckedAt", 0L)
+        set(v) = sp.edit().putLong("updateCheckedAt", v).apply()
 
     /** 长按说话开关（沿用旧键名） */
     var volumeKey: Boolean
@@ -68,14 +134,15 @@ class Prefs(ctx: Context) {
         set(v) = sp.edit().putBoolean("bubbleAlways", v).apply()
 
     var bubbleX: Int
-        get() = sp.getInt("bubbleX", -1)
+        get() = sp.getInt("bubbleX", UNSET)
         set(v) = sp.edit().putInt("bubbleX", v).apply()
 
     var bubbleY: Int
-        get() = sp.getInt("bubbleY", -1)
+        get() = sp.getInt("bubbleY", UNSET)
         set(v) = sp.edit().putInt("bubbleY", v).apply()
 
-    private companion object {
-        const val ALL = "all"
+    companion object {
+        const val UNSET = Int.MIN_VALUE
+        private const val ALL = "all"
     }
 }

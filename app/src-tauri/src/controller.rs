@@ -1,6 +1,7 @@
 //! 会话编排：快捷键 → 录音 → 识别 → 上屏；「全部」模式流式候选面板；设置页渠道对比
 use crate::hotkey::{HotEvent, Shared};
 use crate::settings::{Channel, Settings};
+use crate::sound::SoundEvent;
 use crate::{offline, ui, wtoffline, AppState};
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -11,7 +12,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tauri::async_runtime::JoinHandle;
 use voicekey_core::audio::Recorder;
-use voicekey_core::{BaiduEngine, ChatterflyEngine, DoubaoEngine, Engine, IflyEngine, QwenEngine, SogouEngine, WeTypeEngine};
+use voicekey_core::jev::{Config as JevConfig, SelectionThreshold};
+use voicekey_core::{BageshuoEngine, BaiduEngine, ChatterflyEngine, DoubaoEngine, Engine, IflyEngine, QwenAppEngine, QwenEngine, SogouEngine, WeTypeEngine};
 use voicekey_platform::{self as pf, Special, Typer};
 
 pub enum Msg {
@@ -20,6 +22,7 @@ pub enum Msg {
     Partial { gen: u64, ch: Channel, seg: usize, text: String },
     Done { gen: u64, ch: Channel, seg: usize, res: Result<String, String> },
     Timeout { token: u64 },
+    PickGrace { gen: u64, token: u64 },
     Flush,
     PickChoose(usize),
     PickKey(Special),
@@ -27,7 +30,20 @@ pub enum Msg {
     CompareStop,
     Meter(bool),
     RefreshMeter,
+    /// 设置页在录音中即时调整 ducking；worker 自己负责所有权判断、平滑重定向和安全恢复。
+    VolumeDucking { enabled: bool, reduction_percent: u8 },
     MicrophonesChanged(Vec<String>),
+    /// Jev 评选结果：res 是 rows 下标；gen 与 token 任一对不上都说明已过期
+    JevDone { gen: u64, token: u64, res: Result<usize, String> },
+}
+
+/// 候选框里 Jev 智能选择的进度
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum JevState {
+    Idle,
+    Busy,
+    Failed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Debug)]
@@ -53,6 +69,7 @@ struct Model<'a> {
     recording: bool,
     rows: &'a [Row],
     sel: usize,
+    jev: JevState,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -68,6 +85,56 @@ enum Mode {
 struct Segments {
     parts: Vec<(String, bool)>,
     error: Option<String>,
+}
+
+/// 候选等待独立于识别总超时；每次开始或续录快照选择参数并使旧定时器失效。
+///
+/// Candidate waiting is independent of recognition timeout. Starting or resuming snapshots selection settings and invalidates old timers.
+struct PickProgress {
+    grace: Option<Instant>,
+    token: u64,
+    threshold: SelectionThreshold,
+    wait: Duration,
+}
+
+impl Default for PickProgress {
+    fn default() -> Self {
+        Self {
+            grace: None, token: 0, threshold: SelectionThreshold::default(),
+            wait: Duration::from_millis(voicekey_core::jev::SELECTION_WAIT_DEFAULT_MS),
+        }
+    }
+}
+
+impl PickProgress {
+    fn begin(&mut self, mut config: JevConfig) {
+        self.reset();
+        config.sanitize_selection();
+        self.threshold = config.selection_threshold;
+        self.wait = Duration::from_millis(config.selection_wait_ms);
+    }
+
+    fn reset(&mut self) {
+        self.cancel_grace();
+    }
+
+    fn cancel_grace(&mut self) {
+        self.token += 1;
+        self.grace = None;
+    }
+
+    fn arm(&mut self, now: Instant) -> Option<u64> {
+        if self.grace.is_some() {
+            return None;
+        }
+        self.token += 1;
+        self.grace = Some(now + self.wait);
+        Some(self.token)
+    }
+
+    fn expired(&self, token: u64, now: Instant) -> bool {
+        token == self.token && self.grace.is_some_and(|deadline| now >= deadline)
+    }
 }
 
 impl Segments {
@@ -124,6 +191,7 @@ pub struct Ctl {
     recorder: Option<Recorder>,
     meter: Option<Recorder>,
     meter_enabled: bool,
+    volume_ducking: pf::OutputVolumeDucker,
     tasks: Vec<JoinHandle<()>>,
     gen: u64,
     timeout_token: u64,
@@ -141,10 +209,24 @@ pub struct Ctl {
     sel: usize,
     user_picked: bool,
     choose_pending: bool,
+    pick: PickProgress,
+    jev: JevState,
+    /// 当前有效的 Jev 请求编号；手选或新一段录音时自增，晚到结果据此丢弃
+    jev_token: u64,
+    /// 用户做过选择类操作。`user_picked` 会被 `last_pick` 预选置位，不能代替它
+    manual: bool,
     released_at: Option<Instant>,
     front: Option<pf::FrontApp>,
     last_emit: Instant,
     flush_pending: bool,
+    /// 本次录音结束时刻：「处理」提示音须在音量还原完成后播放，以此估算剩余还原窗口
+    stopped_at: Option<Instant>,
+    /// 本次会话是否确实压低过系统音量：「处理/失败」提示音只在压过音量时等待恢复窗口；
+    /// ducking 关闭（默认）或未生效时识别结束后立即播放，不固定晚约 450ms
+    ducked: bool,
+    /// 提示音会话代数：每次开始录音递增；延迟提示音到期时代数已变则丢弃，
+    /// 避免快速连续开始/停止时新旧提示音错拍重叠（发出奇怪声音）
+    chime_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// 按下到判定长按之间已经打开的麦克风，确认开始后把这段音频交出去
     primed: Option<Primed>,
     /// 「录音时静音系统」的 guard：开麦时挂上，收麦时丢掉（Drop 里恢复原状）
@@ -166,6 +248,7 @@ const PREROLL: usize = 50;
 
 pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) {
     let st = app.state::<AppState>();
+    let volume_fraction = st.settings.read().unwrap().retained_system_volume_fraction();
     let mut engines: HashMap<Channel, Arc<dyn Engine>> = HashMap::new();
     engines.insert(Channel::Doubao, Arc::new(DoubaoEngine));
     engines.insert(Channel::Wetype, Arc::new(WeTypeEngine::default()));
@@ -174,6 +257,8 @@ pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) 
     engines.insert(Channel::Sogou, Arc::new(SogouEngine));
     engines.insert(Channel::Iflytek, Arc::new(IflyEngine));
     engines.insert(Channel::Chatterfly, Arc::new(ChatterflyEngine));
+    engines.insert(Channel::QwenApp, Arc::new(QwenAppEngine::default()));
+    engines.insert(Channel::Bageshuo, Arc::new(BageshuoEngine));
     if let Some(e) = offline::engine() {
         engines.insert(Channel::Offline, e);
     }
@@ -187,6 +272,7 @@ pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) 
         recorder: None,
         meter: None,
         meter_enabled: false,
+        volume_ducking: pf::OutputVolumeDucker::new(volume_fraction),
         tasks: Vec::new(),
         gen: 0,
         timeout_token: 0,
@@ -203,10 +289,17 @@ pub fn spawn(app: AppHandle, qwen: Arc<QwenEngine>, rx: UnboundedReceiver<Msg>) 
         sel: 0,
         user_picked: false,
         choose_pending: false,
+        pick: PickProgress::default(),
+        jev: JevState::Idle,
+        jev_token: 0,
+        manual: false,
         released_at: None,
         front: None,
         last_emit: Instant::now(),
         flush_pending: false,
+        stopped_at: None,
+        ducked: false,
+        chime_gen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         primed: None,
         output_mute: None,
     };
@@ -250,13 +343,31 @@ impl Ctl {
             Msg::Partial { gen, ch, seg, text } if gen == self.gen => self.partial(ch, seg, text),
             Msg::Done { gen, ch, seg, res } if gen == self.gen => self.done(ch, seg, res),
             Msg::Timeout { token } if token == self.timeout_token && self.mode != Mode::Idle => {
-                self.abort(Some("识别超时".into()))
+                if self.mode == Mode::Pick && self.rows.iter().any(|r| r.state == RowState::Final) {
+                    self.advance_pick();
+                } else {
+                    self.abort(Some("识别超时".into()))
+                }
+            }
+            Msg::PickGrace { gen, token } if gen == self.gen && self.mode == Mode::Pick && !self.recording && self.pick.expired(token, Instant::now()) => {
+                self.pick.cancel_grace();
+                if self.choose_pending || (!self.manual && self.settings().jev.targets().is_ok()) {
+                    self.finish_slow_rows();
+                }
+                self.advance_pick();
+                if self.mode == Mode::Pick {
+                    self.emit_rows();
+                }
             }
             Msg::Flush => {
                 self.flush_pending = false;
                 self.emit_rows();
             }
-            Msg::PickChoose(i) if self.mode == Mode::Pick => self.choose(i),
+            Msg::JevDone { gen, token, res } => self.jev_done(gen, token, res),
+            Msg::PickChoose(i) if self.mode == Mode::Pick => {
+                self.take_manual();
+                self.choose(i)
+            }
             Msg::PickKey(k) if self.mode == Mode::Pick => self.pick_key(k),
             Msg::CompareToggle => match self.mode {
                 Mode::Compare if self.recording => self.end(),
@@ -269,6 +380,16 @@ impl Ctl {
                 self.refresh_meter();
             }
             Msg::RefreshMeter => self.refresh_meter(),
+            Msg::VolumeDucking { enabled, reduction_percent } => {
+                // 设置/UI 统一使用“降低比例”；worker 只接收最终保留比例，因此只在这里做一次补数换算。
+                // ducked 记录本次会话是否真的压低过音量：生效置位，显式关闭即视为已发起恢复。
+                if enabled && self.recording {
+                    self.ducked = true;
+                } else if !enabled {
+                    self.ducked = false;
+                }
+                self.volume_ducking.configure(enabled && self.recording, 1.0 - reduction_percent as f32 / 100.0)
+            }
             Msg::MicrophonesChanged(mics) => {
                 let _ = self.app.emit("microphones", mics);
                 self.refresh_meter();
@@ -310,6 +431,7 @@ impl Ctl {
                 _ => self.begin(false),
             },
             HotEvent::Release => {
+                // 点按录音由静音/Tap 结束；同键被判为长按后的 Release 不应改写点按语义。
                 if !self.auto_stop && self.mode != Mode::Compare {
                     self.end()
                 }
@@ -387,29 +509,59 @@ impl Ctl {
 
     fn start_recorder(&mut self) -> Option<voicekey_core::Audio> {
         self.meter = None;
-        if let Some(audio) = self.take_primed() {
-            return Some(audio);
-        }
+        let audio = if let Some(audio) = self.take_primed() {
+            audio
+        } else {
+            let tx = self.tx.clone();
+            let mic = self.settings().mic;
+            let (r, audio) = match Recorder::start(Some(&mic), move |v| {
+                let _ = tx.send(Msg::Level(v));
+            }) {
+                Ok(v) => v,
+                Err(e) => {
+                    ui::hud_error(&self.app, &format!("{e:#}"));
+                    crate::sound::play(&self.app, SoundEvent::Error);
+                    return None;
+                }
+            };
+            self.recorder = Some(r);
+            self.recording = true;
+            self.heard_voice = false;
+            self.last_voice = Instant::now();
+            audio
+        };
+
+        // 成功开麦（含预开麦转正）发开始音。开始音必须在压低音量之前发
+        // （cometix-dictation 同序：开麦 → 播开始音 → 压音量），否则音没播完就被压掉。
+        // 新会话开始：递增提示音代数，上一会话尚在排队/等待的延迟提示音全部作废；
+        // ducked 按本会话重新累计，上一会话压没压过音量与本会话无关
+        self.chime_gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.ducked = false;
+        crate::sound::play(&self.app, SoundEvent::Start);
+        // Press 时的 arm() 只是预开麦，误触/短按取消都不应碰系统音量；只有确认真正进入聆听后才开始 duck。
+        // 压低延迟到开始提示音播完（按 play_duration）；handler 以 enabled && self.recording 把关，
+        // 提示音播放期间会话被取消时不会压低音量。
+        let settings = self.settings();
+        let delay = crate::sound::play_duration(&self.app, SoundEvent::Start, &self.settings());
+        let (enabled, reduction_percent) = (settings.lower_system_volume, settings.lower_system_volume_percent);
         let tx = self.tx.clone();
-        let mic = self.settings().mic;
-        match Recorder::start(Some(&mic), move |v| {
-            let _ = tx.send(Msg::Level(v));
-        }) {
-            Ok((r, audio)) => {
-                self.mute_output();
-                self.recorder = Some(r);
-                self.recording = true;
-                self.heard_voice = false;
-                self.last_voice = Instant::now();
-                self.record_started = Instant::now();
-                ui::set_tray_active(&self.app, true);
-                Some(audio)
+        // fork：录音态登记。mute_output 有 output_mute.is_none() 把关，arm() 已静音过则不重复；
+        // 直接 begin()（不经 arm）进来时在这里补上静音。托盘高亮与时间戳两条路径都要刷新
+        self.mute_output();
+        self.record_started = Instant::now();
+        ui::set_tray_active(&self.app, true);
+        let chime_gen = self.chime_gen.clone();
+        let my_gen = chime_gen.load(std::sync::atomic::Ordering::Relaxed);
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(delay).await;
+            // 延迟压音量与延迟提示音共用会话代数门闩：等待期间取消或又开了新会话
+            // （代数已变）则丢弃本条，避免上一次的延迟消息压到新一次的开始音（review #6）
+            if chime_gen.load(std::sync::atomic::Ordering::Relaxed) != my_gen {
+                return;
             }
-            Err(e) => {
-                ui::hud_error(&self.app, &format!("{e:#}"));
-                None
-            }
-        }
+            let _ = tx.send(Msg::VolumeDucking { enabled, reduction_percent });
+        });
+        Some(audio)
     }
 
     /// 快捷键按下即开麦。短按取消或被别的键打断时关掉
@@ -490,11 +642,41 @@ impl Ctl {
         }
         self.recording = false;
         self.auto_stop = false;
+        // 先发恢复意图；若此时还在淡入/淡出，worker 会从当前实际音量平滑反向，而不是排队跑完整段动画。
+        self.volume_ducking.set_active(false);
+        self.stopped_at = Some(Instant::now());
         if let Some(mut r) = self.recorder.take() {
             r.stop();
         }
+        // fork：结束录音时解除静音并熄灭托盘高亮（OutputMute guard drop 即恢复原状态）
         self.output_mute = None;
         ui::set_tray_active(&self.app, false);
+    }
+
+    /// 录音结束后的单音提示（处理音/失败音）：等系统输出音量恢复后再播，避免卡在还原淡入的前半段听不清。
+    /// 带会话代数门闩：等待期间用户再次开始录音（代数递增）则丢弃本条，避免新旧提示音错拍重叠。
+    /// 恢复窗口只对本次会话确实压低过音量的情况有意义；ducking 关闭/未生效时立即播放。
+    fn play_after_restore(&self, event: SoundEvent) {
+        let app = self.app.clone();
+        let restore_wait = if self.ducked { self.restore_wait() } else { Duration::ZERO };
+        let gen = self.chime_gen.clone();
+        let my_gen = gen.load(std::sync::atomic::Ordering::Relaxed);
+        tauri::async_runtime::spawn(async move {
+            if !restore_wait.is_zero() {
+                tokio::time::sleep(restore_wait).await;
+            }
+            if gen.load(std::sync::atomic::Ordering::Relaxed) != my_gen {
+                return;
+            }
+            crate::sound::play(&app, event);
+        });
+    }
+
+    /// 距本次录音结束的剩余还原等待：stop 后不足恢复窗口（450ms，音量 worker 淡入上界）的部分。
+    fn restore_wait(&self) -> Duration {
+        const RESTORE_WINDOW: Duration = Duration::from_millis(450);
+        let since_stop = self.stopped_at.map_or(RESTORE_WINDOW, |t| t.elapsed());
+        RESTORE_WINDOW.saturating_sub(since_stop)
     }
 
     fn spawn_engine(&mut self, ch: Channel, seg: usize, audio: voicekey_core::Audio) {
@@ -545,6 +727,10 @@ impl Ctl {
         }
         self.released_at = None;
         self.choose_pending = false;
+        self.pick.begin(self.settings().jev);
+        self.jev_token += 1;
+        self.jev = JevState::Idle;
+        self.manual = false;
         let mut targets = Vec::new();
         for (r, segs) in self.rows.iter_mut().zip(&mut self.row_segs) {
             if r.state == RowState::Skip {
@@ -575,15 +761,19 @@ impl Ctl {
         self.sel = 0;
         self.user_picked = false;
         self.choose_pending = false;
+        self.jev_token += 1;
+        self.jev = JevState::Idle;
+        self.manual = false;
         self.released_at = None;
+        self.pick.begin(self.settings().jev);
         self.rows = channels
             .into_iter()
             .map(|ch| {
-                let skip = !crate::model_ready(ch);
+                let skip = crate::unavailable(ch);
                 Row {
                     channel: ch,
-                    text: if skip { "离线模型未下载，已跳过".into() } else { String::new() },
-                    state: if skip { RowState::Skip } else { RowState::Listen },
+                    text: skip.unwrap_or_default().into(),
+                    state: if skip.is_some() { RowState::Skip } else { RowState::Listen },
                     ms: None,
                 }
             })
@@ -641,6 +831,9 @@ impl Ctl {
             }
             Mode::Pick | Mode::Compare => {
                 if let Some(i) = self.rows.iter().position(|r| r.channel == ch) {
+                    if self.mode == Mode::Pick && !matches!(self.rows[i].state, RowState::Listen | RowState::Wait) {
+                        return;
+                    }
                     if let Some(changed) = self.row_segs[i].partial(seg, text) {
                         self.rows[i].text = self.row_segs[i].text();
                         if changed {
@@ -689,11 +882,17 @@ impl Ctl {
                         format!("识别失败：{e}，已保留已识别的文字")
                     };
                     ui::hud_error(&self.app, &msg);
+                    self.play_after_restore(SoundEvent::Error);
                 } else if streamed {
                     ui::hud_hide(&self.app, 0);
+                    // 流式定稿：有文字即完成；什么都没识别到按失败提示
+                    if text.is_empty() {
+                        self.play_after_restore(SoundEvent::Error);
+                    }
                 } else if text.is_empty() {
                     ui::hud(&self.app, "info", "没有识别到内容", ch);
                     ui::hud_hide(&self.app, 1000);
+                    self.play_after_restore(SoundEvent::Error);
                 } else {
                     ui::hud_hide(&self.app, 0);
                     self.insert(&text);
@@ -702,6 +901,9 @@ impl Ctl {
             Mode::Pick | Mode::Compare => {
                 let ms = self.released_at.map(|t| t.elapsed().as_millis() as u64);
                 let Some(i) = self.rows.iter().position(|r| r.channel == ch) else { return };
+                if self.mode == Mode::Pick && !matches!(self.rows[i].state, RowState::Listen | RowState::Wait) {
+                    return;
+                }
                 let segs = &mut self.row_segs[i];
                 segs.done(seg, res, false);
                 let text = segs.text();
@@ -733,10 +935,21 @@ impl Ctl {
                 if finished {
                     self.choose_pending = false;
                     self.timeout_token += 1;
+                }
+                self.advance_pick();
+                if self.mode == Mode::Idle {
+                    return;
+                }
+                if finished {
                     if self.mode == Mode::Compare {
                         self.stop_recording();
                         self.mode = Mode::Idle;
                         self.tasks.clear();
+                    }
+                    // 全部行出结果：有可用结果时完成不另发声（完成信号由进入识别时的处理音承担）；
+                    // 全部失败仍发失败音
+                    if !self.rows.iter().any(|r| r.state == RowState::Final) {
+                        self.play_after_restore(SoundEvent::Error);
                     }
                 }
                 self.emit_rows();
@@ -773,6 +986,10 @@ impl Ctl {
             return;
         }
         self.stop_recording();
+        // 进入识别处理时播「处理」音：等音量恢复窗口后再播，避免卡在还原淡入前半段听不清（Idle 无会话不发声）
+        if !matches!(self.mode, Mode::Idle) {
+            self.play_after_restore(SoundEvent::Processing);
+        }
         match self.mode {
             Mode::Single(ch) => ui::hud(&self.app, "wait", "", ch),
             Mode::Pick | Mode::Compare => {
@@ -794,6 +1011,7 @@ impl Ctl {
             tokio::time::sleep(wait).await;
             let _ = tx.send(Msg::Timeout { token });
         });
+        self.advance_pick();
     }
 
     /// 打断：再按快捷键/Esc/超时；message 为 None 表示用户取消
@@ -809,6 +1027,10 @@ impl Ctl {
             Mode::Compare | Mode::Idle => String::new(),
         };
         self.cancel();
+        // 超时等异常打断发失败音；用户取消（message 为 None）保持安静
+        if message.is_some() {
+            self.play_after_restore(SoundEvent::Error);
+        }
         if mode == Mode::Pick {
             if let Some(f) = self.front.take() {
                 f.activate();
@@ -848,9 +1070,17 @@ impl Ctl {
     fn cancel(&mut self) {
         self.gen += 1;
         self.timeout_token += 1;
+        self.pick.reset();
+        // 作废已排队/等待中的延迟提示音（处理音等）：松手后恢复窗口内取消（Esc/超时）不再出声（review #5）。
+        // abort() 随后的 play_after_restore(Error) 在本次递增之后捕获代数，失败音不受影响。
+        self.chime_gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // 会话作废：本次未再压低音量，后续录音重新累计
+        self.ducked = false;
         for t in self.tasks.drain(..) {
             t.abort();
         }
+        // cancel 可能发生在预开麦阶段；丢弃 Primed 会经 Recorder::Drop 同步停麦。
+        self.primed = None;
         self.stop_recording();
         if let Some(mut t) = self.typer.take() {
             t.finish();
@@ -866,6 +1096,9 @@ impl Ctl {
         let n = self.rows.len();
         if n == 0 {
             return;
+        }
+        if matches!(k, Special::Up | Special::Down | Special::Digit(_) | Special::Enter) {
+            self.take_manual();
         }
         match k {
             Special::Up | Special::Down => {
@@ -935,6 +1168,121 @@ impl Ctl {
         insert(&self.app, text);
     }
 
+    /// 用户做了选择类操作：从此不再自动评选，进行中的 Jev 结果作废
+    fn take_manual(&mut self) {
+        self.manual = true;
+        if self.jev == JevState::Busy {
+            self.jev_token += 1;
+            self.jev = JevState::Idle;
+        }
+    }
+
+    /// 仅为有效 Jev 提前评选；停录后达到本次录音快照的门槛立即推进，否则从首条可用定稿起等待快照时长。
+    /// Jev 关闭或配置不可用时保留候选供手选，不提前封存慢渠道。
+    /// 人工等待中的渠道不被比例阈值抢占；宽限到期仍可回退到已有定稿。
+    ///
+    /// Advance early only for valid Jev. After recording stops, use the snapshotted threshold or wait duration from the first available final.
+    /// Disabled or invalid Jev leaves candidates for manual selection without sealing slow channels early.
+    /// The threshold cannot preempt a pending manual choice, which may still fall back to a final when grace expires.
+    fn advance_pick(&mut self) {
+        if self.mode != Mode::Pick || self.recording {
+            return;
+        }
+        let has_final = self.rows.iter().any(|r| r.state == RowState::Final);
+        if has_final {
+            self.timeout_token += 1;
+        }
+        let auto = self.settings().jev.targets().is_ok();
+        let mut waiting = self.rows.iter().any(|r| matches!(r.state, RowState::Listen | RowState::Wait));
+        if waiting && auto && !self.manual && !self.choose_pending && jev_ready(&self.rows, self.pick.threshold) {
+            self.finish_slow_rows();
+            waiting = false;
+        }
+        if waiting && has_final && ((auto && !self.manual) || self.choose_pending) {
+            if let Some(token) = self.pick.arm(Instant::now()) {
+                let (gen, tx) = (self.gen, self.tx.clone());
+                let wait = self.pick.wait;
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(wait).await;
+                    let _ = tx.send(Msg::PickGrace { gen, token });
+                });
+            }
+        } else {
+            self.pick.cancel_grace();
+        }
+        if self.choose_pending && matches!(self.rows[self.sel].state, RowState::Error | RowState::Skip) {
+            if let Some(i) = self.rows.iter().position(|r| r.state == RowState::Final) {
+                self.sel = i;
+            }
+        }
+        if self.choose_pending && self.rows[self.sel].state == RowState::Final {
+            return self.choose(self.sel);
+        }
+        if !waiting {
+            self.choose_pending = false;
+            self.maybe_jev();
+        }
+    }
+
+    /// 封存未完成行而不覆盖文字；分段也标记完成，续录后旧回调不能重新打开这些片段。
+    ///
+    /// Seal unfinished rows without overwriting text, and finish their segments so stale callbacks cannot reopen them after resuming.
+    fn finish_slow_rows(&mut self) {
+        seal_slow_rows(&mut self.rows, &mut self.row_segs);
+    }
+
+    /// 有效 Jev 配置评选多条定稿，只有一条时直接上屏；Jev 关闭、配置不可用或评选失败时保留手选。
+    ///
+    /// Use configured Jev for multiple finals and paste a sole result. Disabled, invalid, or failed Jev leaves selection to the user.
+    fn maybe_jev(&mut self) {
+        if self.mode != Mode::Pick || self.recording || self.choose_pending || self.manual || self.jev != JevState::Idle {
+            return;
+        }
+        let cfg = self.settings().jev;
+        if cfg.targets().is_err() {
+            return;
+        }
+        let finals = jev_finals(&self.rows);
+        match finals.as_slice() {
+            [] => {}
+            [(i, _)] => self.choose(*i),
+            _ => {
+                // 评选已接管后续流程，使识别超时失效；慢渠道不得打断 Jev 或关闭评选失败后的手选面板。
+                //
+                // Invalidate the recognition timeout once selection takes over, so slow channels cannot interrupt Jev or close the manual picker after failure.
+                self.timeout_token += 1;
+                self.jev = JevState::Busy;
+                self.jev_token += 1;
+                let (gen, token, tx) = (self.gen, self.jev_token, self.tx.clone());
+                let (idxs, texts): (Vec<usize>, Vec<String>) = finals.into_iter().unzip();
+                tauri::async_runtime::spawn(async move {
+                    let res = voicekey_core::jev::pick(&cfg, &texts)
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(|p| idxs.get(p.index).copied().ok_or_else(|| format!("Jev 返回了无效序号 {}", p.index)));
+                    let _ = tx.send(Msg::JevDone { gen, token, res });
+                });
+                self.emit_rows();
+            }
+        }
+    }
+
+    fn jev_done(&mut self, gen: u64, token: u64, res: Result<usize, String>) {
+        if gen != self.gen || token != self.jev_token || self.mode != Mode::Pick {
+            return;
+        }
+        match res {
+            Ok(i) if self.rows.get(i).is_some_and(|r| r.state == RowState::Final) => {
+                self.jev = JevState::Idle;
+                self.choose(i);
+            }
+            _ => {
+                self.jev = JevState::Failed;
+                self.emit_rows();
+            }
+        }
+    }
+
     /// 最多每 33ms 推送一次，避免文字跳动
     fn emit_rows(&mut self) {
         let wait = Duration::from_millis(33).saturating_sub(self.last_emit.elapsed());
@@ -950,7 +1298,7 @@ impl Ctl {
             return;
         }
         self.last_emit = Instant::now();
-        let model = Model { recording: self.recording, rows: &self.rows, sel: self.sel };
+        let model = Model { recording: self.recording, rows: &self.rows, sel: self.sel, jev: self.jev };
         match self.mode {
             Mode::Pick => {
                 let _ = self.app.emit_to("pick", "pick", model);
@@ -970,9 +1318,214 @@ fn insert(app: &tauri::AppHandle, text: &str) {
     }
 }
 
+/// 跳过的渠道不计入参与数，错误仍计入参与数但不算成功；所有参与渠道终结后允许使用不足阈值的定稿回退。
+/// 按所选比例向上取整，例如默认八个参与渠道需要六条 Final，任何中间文本都不计数。
+///
+/// Skipped channels do not participate; errors participate but do not count as successes. Once all channels end, allow fallback below the threshold.
+/// Round the selected ratio up: by default eight participants require six Final rows; partial text never counts.
+fn jev_ready(rows: &[Row], threshold: SelectionThreshold) -> bool {
+    let participating = rows.iter().filter(|r| r.state != RowState::Skip).count();
+    let finals = rows.iter().filter(|r| r.state == RowState::Final).count();
+    participating > 0 && (threshold.reached(finals, participating) || !rows.iter().any(|r| matches!(r.state, RowState::Listen | RowState::Wait)))
+}
+
+/// 取出已定稿的行（rows 下标, 文字），按 rows 顺序；Error/Skip/聆听中的行不参与评选
+fn jev_finals(rows: &[Row]) -> Vec<(usize, String)> {
+    rows.iter().enumerate().filter(|(_, r)| r.state == RowState::Final).map(|(i, r)| (i, r.text.clone())).collect()
+}
+
+fn seal_slow_rows(rows: &mut [Row], segments: &mut [Segments]) {
+    for (row, segs) in rows.iter_mut().zip(segments) {
+        if matches!(row.state, RowState::Listen | RowState::Wait) {
+            row.state = RowState::Error;
+            for (_, done) in &mut segs.parts {
+                *done = true;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Segments;
+    use super::{jev_finals, seal_slow_rows, JevConfig, PickProgress, Row, RowState, Segments, SelectionThreshold};
+    use std::time::{Duration, Instant};
+    use crate::settings::Channel;
+
+    fn row(channel: Channel, state: RowState, text: &str) -> Row {
+        Row { channel, text: text.into(), state, ms: None }
+    }
+
+    fn jev_ready(rows: &[Row]) -> bool {
+        super::jev_ready(rows, SelectionThreshold::default())
+    }
+
+    #[test]
+    fn selection_settings_are_snapshotted_until_next_recording_or_resume() {
+        let now = Instant::now();
+        let mut config = JevConfig { selection_threshold: SelectionThreshold::All, selection_wait_ms: 5000, ..JevConfig::default() };
+        let mut pick = PickProgress::default();
+        pick.begin(config.clone());
+        config.selection_threshold = SelectionThreshold::Half;
+        config.selection_wait_ms = 500;
+        let old = pick.arm(now).unwrap();
+        assert_eq!(pick.threshold, SelectionThreshold::All);
+        assert!(!pick.expired(old, now + Duration::from_millis(4999)));
+        assert!(pick.expired(old, now + Duration::from_millis(5000)));
+        pick.begin(config);
+        assert_eq!(pick.threshold, SelectionThreshold::Half);
+        assert!(!pick.expired(old, now + Duration::from_secs(9)));
+        let next = pick.arm(now).unwrap();
+        assert!(!pick.expired(next, now + Duration::from_millis(499)));
+        assert!(pick.expired(next, now + Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn each_threshold_excludes_skips_but_keeps_errors_in_participants() {
+        let mut rows = vec![row(Channel::Doubao, RowState::Final, "定稿"); 2];
+        rows.push(row(Channel::Qwen, RowState::Wait, "中间结果"));
+        rows.push(row(Channel::Baidu, RowState::Error, "失败"));
+        rows.push(row(Channel::Offline, RowState::Skip, "跳过"));
+        assert!(super::jev_ready(&rows, SelectionThreshold::Half));
+        assert!(!super::jev_ready(&rows, SelectionThreshold::TwoThirds));
+        assert!(!super::jev_ready(&rows, SelectionThreshold::All));
+        rows[3].state = RowState::Skip;
+        assert!(super::jev_ready(&rows, SelectionThreshold::TwoThirds));
+        assert!(!super::jev_ready(&rows, SelectionThreshold::All));
+        rows[2].state = RowState::Error;
+        assert!(super::jev_ready(&rows, SelectionThreshold::All));
+    }
+
+    #[test]
+    fn grace_is_armed_once_and_keeps_full_duration_after_a_late_first_final() {
+        let stopped = Instant::now();
+        let first = stopped + Duration::from_millis(14900);
+        let mut pick = PickProgress::default();
+        let token = pick.arm(first).unwrap();
+        assert!(pick.arm(first + Duration::from_secs(1)).is_none());
+        assert!(!pick.expired(token, stopped + Duration::from_secs(15)));
+        assert!(!pick.expired(token, first + Duration::from_millis(2499)));
+        assert!(pick.expired(token, first + Duration::from_millis(2500)));
+    }
+
+    #[test]
+    fn threshold_completion_and_resume_invalidate_old_grace_tokens() {
+        let now = Instant::now();
+        let mut pick = PickProgress::default();
+        let token = pick.arm(now).unwrap();
+        pick.cancel_grace();
+        assert!(!pick.expired(token, now + Duration::from_secs(3)));
+        let resumed = pick.arm(now).unwrap();
+        pick.reset();
+        assert!(!pick.expired(resumed, now + Duration::from_secs(3)));
+        assert!(pick.arm(now).is_some());
+    }
+
+    #[test]
+    fn sealing_slow_rows_keeps_partial_text_and_rejects_old_segments_after_resume() {
+        let mut rows = vec![row(Channel::Doubao, RowState::Final, "定稿"), row(Channel::Qwen, RowState::Wait, "中间文字")];
+        let mut segments = vec![Segments::default(), Segments::default()];
+        let old = segments[1].start();
+        segments[1].partial(old, "中间文字".into());
+        seal_slow_rows(&mut rows, &mut segments);
+        assert_eq!(rows[0].state, RowState::Final);
+        assert_eq!(rows[1].state, RowState::Error);
+        assert_eq!(rows[1].text, "中间文字");
+        assert!(segments[1].finished());
+        let new = segments[1].start();
+        assert_eq!(segments[1].partial(old, "迟到中间结果".into()), None);
+        segments[1].done(old, Ok("迟到定稿".into()), false);
+        assert!(!segments[1].finished());
+        assert_eq!(segments[1].text(), "中间文字");
+        segments[1].done(new, Ok("续录".into()), false);
+        assert_eq!(segments[1].text(), "中间文字续录");
+    }
+
+    #[test]
+    fn jev_threshold_rounds_up_for_each_participating_channel_count() {
+        for (participating, required) in [(1, 1), (2, 2), (3, 2), (4, 3), (5, 4), (6, 4), (7, 5), (8, 6), (9, 6)] {
+            let mut rows = vec![row(Channel::Doubao, RowState::Wait, "尚未定稿"); participating];
+            for r in rows.iter_mut().take(required - 1) {
+                r.state = RowState::Final;
+            }
+            assert!(!jev_ready(&rows), "{participating} channels must wait below {required} finals");
+            rows[required - 1].state = RowState::Final;
+            assert!(jev_ready(&rows), "{participating} channels are ready at {required} finals");
+        }
+    }
+
+    #[test]
+    fn jev_skip_is_excluded_but_error_is_not_a_success() {
+        let mut rows = vec![row(Channel::Doubao, RowState::Final, "最终结果"); 5];
+        rows.push(row(Channel::Qwen, RowState::Wait, "中间结果"));
+        rows.push(row(Channel::Baidu, RowState::Listen, "仍在识别"));
+        rows.push(row(Channel::Offline, RowState::Error, "失败"));
+        assert!(!jev_ready(&rows));
+
+        rows[7].state = RowState::Skip;
+        assert!(jev_ready(&rows));
+        assert_eq!(jev_finals(&rows).len(), 5);
+
+        rows[7].state = RowState::Error;
+        rows[5].state = RowState::Final;
+        assert!(jev_ready(&rows));
+        assert_eq!(jev_finals(&rows).len(), 6);
+    }
+
+    #[test]
+    fn jev_all_channels_ended_allows_zero_one_or_multiple_finals_below_threshold() {
+        for final_count in 0..=2 {
+            let mut rows = vec![row(Channel::Doubao, RowState::Error, "识别失败"); 8];
+            for r in rows.iter_mut().take(final_count) {
+                r.state = RowState::Final;
+                r.text = "最终结果".into();
+            }
+            rows[7].state = RowState::Wait;
+            assert!(!jev_ready(&rows));
+            rows[7].state = RowState::Error;
+            assert!(jev_ready(&rows));
+            assert_eq!(jev_finals(&rows).len(), final_count);
+        }
+
+        assert!(!jev_ready(&[]));
+        assert!(!jev_ready(&[row(Channel::Offline, RowState::Skip, "跳过")]));
+    }
+
+    #[test]
+    fn jev_resumed_rows_wait_for_new_finals_and_candidates_are_a_snapshot() {
+        let mut rows = vec![row(Channel::Doubao, RowState::Final, "上一段"); 3];
+        let candidates = jev_finals(&rows);
+        for r in &mut rows {
+            r.state = RowState::Listen;
+            r.text = "上一段和续录中间结果".into();
+        }
+        assert!(!jev_ready(&rows));
+        assert!(jev_finals(&rows).is_empty());
+
+        rows[0].state = RowState::Final;
+        rows[1].state = RowState::Final;
+        assert!(jev_ready(&rows));
+        assert_eq!(jev_finals(&rows).len(), 2);
+        assert_eq!(candidates, vec![(0, "上一段".into()), (1, "上一段".into()), (2, "上一段".into())]);
+    }
+
+    #[test]
+    fn jev_finals_keeps_only_final_rows_with_their_row_index() {
+        assert!(jev_finals(&[]).is_empty());
+        assert!(jev_finals(&[row(Channel::Doubao, RowState::Error, "超时"), row(Channel::Qwen, RowState::Skip, "跳过")]).is_empty());
+
+        let one = [row(Channel::Doubao, RowState::Error, "超时"), row(Channel::Qwen, RowState::Final, "你好")];
+        assert_eq!(jev_finals(&one), vec![(1, "你好".to_string())]);
+
+        let many = [
+            row(Channel::Doubao, RowState::Final, "今天开会"),
+            row(Channel::Wetype, RowState::Error, "失败"),
+            row(Channel::Qwen, RowState::Skip, "离线模型未下载，已跳过"),
+            row(Channel::Baidu, RowState::Final, "今天开灰"),
+            row(Channel::Sogou, RowState::Wait, ""),
+            row(Channel::Iflytek, RowState::Final, "今天开会。"),
+        ];
+        assert_eq!(jev_finals(&many), vec![(0, "今天开会".to_string()), (3, "今天开灰".to_string()), (5, "今天开会。".to_string())]);
+    }
 
     #[test]
     fn resumed_segments_join_in_order_and_wait_for_all() {

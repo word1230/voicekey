@@ -2,9 +2,11 @@
 
 mod controller;
 mod hotkey;
+mod login;
 mod offline;
 mod polish;
 mod settings;
+mod sound;
 mod ui;
 mod update;
 mod wtoffline;
@@ -37,6 +39,7 @@ fn apply<R: Runtime>(app: &AppHandle<R>, s: &Settings) {
         c.polish = s.polish_shortcut.clone();
     }
     ui::refresh_tray(app, s, st.hk.paused.load(Ordering::Relaxed));
+    ui::sync_pick(app, s.channel == Channel::All);
     let al = app.autolaunch();
     if al.is_enabled().unwrap_or(false) != s.autostart {
         let _ = if s.autostart { al.enable() } else { al.disable() };
@@ -71,6 +74,17 @@ pub fn model_ready(ch: Channel) -> bool {
         Channel::Offline => offline::installed(),
         Channel::WetypeOffline => wtoffline::installed(),
         _ => true,
+    }
+}
+
+/// 多渠道识别时要跳过的渠道及原因
+pub fn unavailable(ch: Channel) -> Option<&'static str> {
+    if !model_ready(ch) {
+        return Some("离线模型未下载，已跳过");
+    }
+    match ch.login() {
+        Some(login) if !login.has() => Some("未登录，已跳过"),
+        _ => None,
     }
 }
 
@@ -130,17 +144,34 @@ fn get_state(app: AppHandle) -> serde_json::Value {
         "channels": Channel::available(),
         "offline": { "supported": offline::SUPPORTED },
         "models": { "offline": offline::status(), "wetypeoffline": wtoffline::status() },
+        "accounts": login::status(),
         "perms": perms(),
         "update": update::status(),
     })
 }
 
 #[tauri::command]
-fn set_settings(app: AppHandle, settings: Settings) {
-    let mic_changed = app.state::<AppState>().settings.read().unwrap().mic != settings.mic;
+fn set_settings(app: AppHandle, mut settings: Settings) {
+    // 先归一化外部输入，持久化值和发给音量 worker 的值必须完全一致。
+    settings.sanitize();
+    let new_ducking = settings.lower_system_volume;
+    let new_ducking_percent = settings.lower_system_volume_percent;
+    let (mic_changed, ducking_changed) = {
+        let state = app.state::<AppState>();
+        let current = state.settings.read().unwrap();
+        (
+            current.mic != settings.mic,
+            current.lower_system_volume != new_ducking
+                || current.lower_system_volume_percent != new_ducking_percent,
+        )
+    };
     update_settings(&app, |s| *s = settings);
     if mic_changed {
         send(&app, Msg::RefreshMeter);
+    }
+    if ducking_changed {
+        // 开关或比例在录音中修改都立即生效；非录音状态只更新下次使用的参数。
+        send(&app, Msg::VolumeDucking { enabled: new_ducking, reduction_percent: new_ducking_percent });
     }
 }
 
@@ -165,6 +196,23 @@ fn perm_action(kind: String) {
 #[tauri::command]
 fn model_download(app: AppHandle, ch: Channel) {
     download_model(&app, ch);
+}
+
+/// 粘贴的登录 Cookie，校验通过才保存
+#[tauri::command]
+async fn account_save(app: AppHandle, ch: Channel, value: String) -> Result<(), String> {
+    login::save(&app, ch, &value).await
+}
+
+/// 内置网页登录。建窗口必须在 async 命令里，Windows 上同步命令会死锁
+#[tauri::command]
+async fn account_login(app: AppHandle, ch: Channel) -> Result<(), String> {
+    login::open(&app, ch)
+}
+
+#[tauri::command]
+async fn account_logout(app: AppHandle, ch: Channel) {
+    login::logout(&app, ch);
 }
 
 #[tauri::command]
@@ -217,6 +265,17 @@ fn meter(app: AppHandle, on: bool) {
 }
 
 #[tauri::command]
+fn preview_sound(app: AppHandle, id: String) {
+    crate::sound::play_id(&app, &id);
+}
+
+#[tauri::command]
+fn list_sounds() -> Vec<serde_json::Value> {
+    // 只列出当前平台能发声的音效：非 macOS 无兜底 WAV 的系统音不提供（review #3）
+    crate::sound::selectable_sounds().iter().map(|id| json!({ "id": id, "name": id })).collect()
+}
+
+#[tauri::command]
 fn open_url(url: String) {
     let cmd = if cfg!(target_os = "macos") {
         "open"
@@ -238,6 +297,12 @@ fn update_install(app: AppHandle) {
     update::install(&app);
 }
 
+/// 设置页「测试」按钮：用固定的两条示例转写真打一次 Jev，返回选中项与脱敏 key
+#[tauri::command]
+async fn jev_test(config: voicekey_core::jev::Config) -> Result<voicekey_core::jev::Tested, String> {
+    voicekey_core::jev::test(&config).await.map_err(|e| e.to_string())
+}
+
 fn main() {
     if let Some(code) = offline::worker_main() {
         std::process::exit(code);
@@ -251,7 +316,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_state, set_settings, perm_status, perm_action, microphones, record_shortcut,
             pick_choose, pick_key, pick_resize, compare_toggle, meter, open_url, model_download,
-            update_check, update_install
+            update_check, update_install, jev_test, preview_sound, list_sounds,
+            account_save, account_login, account_logout
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
@@ -287,10 +353,11 @@ fn main() {
             Ok(())
         })
         .on_window_event(|w, e| {
-            if w.label() == "main" && matches!(e, WindowEvent::Destroyed) {
+            // 先禁用电平表，再结束 Compare，避免回到 Idle 时 refresh_meter 瞬间重开麦。
+            if w.label() == "main" && matches!(e, WindowEvent::Destroyed | WindowEvent::CloseRequested { .. }) {
                 let st = w.state::<AppState>();
-                let _ = st.tx.send(Msg::CompareStop);
                 let _ = st.tx.send(Msg::Meter(false));
+                let _ = st.tx.send(Msg::CompareStop);
                 st.hk.recording.store(false, Ordering::Relaxed);
             }
         })

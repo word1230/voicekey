@@ -470,6 +470,26 @@ fn wpctl_muted(out: &str) -> Option<bool> {
     Some(out.contains("[MUTED]"))
 }
 
+// MARK: - 系统输出音量（ducking 后端）
+
+/// 上游的音量 ducking（[`crate::OutputVolumeDucker`]）只在 macOS / Windows 有真实后端；
+/// Linux 上 fork 用 pactl/wpctl 的「录音时静音系统」承担同样的「别打扰人」职责，
+/// 这里给三个空桩让 ducking 线程空转（快照拿不到 → 不接管任何设备），不引第二个实现。
+pub(crate) fn output_volume_default() -> Option<crate::volume::OutputVolumeSnapshot> {
+    None
+}
+
+pub(crate) fn output_volume_for(_original: &crate::volume::OutputVolumeSnapshot) -> Option<crate::volume::OutputVolumeSnapshot> {
+    None
+}
+
+pub(crate) fn output_volume_write(
+    _desired: &crate::volume::OutputVolumeSnapshot,
+    _expected: &crate::volume::OutputVolumeSnapshot,
+) -> Option<crate::volume::OutputVolumeSnapshot> {
+    None
+}
+
 // MARK: - 权限（Linux 无需系统授权）
 
 pub mod perm {

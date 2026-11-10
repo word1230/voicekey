@@ -17,6 +17,7 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rodio = { version = "0.20", default-features = false, features = ["wav"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 anyhow = "1"
 async-trait = "0.1"
@@ -29,6 +30,9 @@ base64 = "0.22"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+# 会话提示音（NSSound，与 cometix-dictation 同源；仅启用所需特性控制编译面）
+objc2-app-kit = { version = "0.3", features = ["NSSound"] }
+objc2-foundation = { version = "0.3", features = ["NSString"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"

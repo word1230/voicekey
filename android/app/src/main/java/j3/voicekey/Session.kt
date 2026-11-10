@@ -4,6 +4,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.Toast
+import org.json.JSONObject
 
 /** 一次说话：录音 → 一个或多个渠道识别 → 写入输入框。状态只在主线程读写 */
 class Session(private val svc: VoiceService) {
@@ -29,8 +31,18 @@ class Session(private val svc: VoiceService) {
     private var userPicked = false
     private var choosePending = false
     private var chooseSend = false
+    private var jevToken = 0
+    private var pickGrace: Runnable? = null
+    private var selectionTiming = JevSelectionTiming()
+    /** 用户已动手选过（点选/换行），Jev 不再介入 */
+    private var manual = false
 
     var rows: List<Row> = emptyList()
+        private set
+    /** Jev 评选进行中，候选框仍可手选 */
+    var jevBusy = false
+        private set
+    var jevFailed = false
         private set
     var sel = 0
         private set
@@ -66,12 +78,16 @@ class Session(private val svc: VoiceService) {
         if (ready.isEmpty()) return svc.hud.error("${chs.first().title}模型未下载，请在 VoiceKey 里下载")
         MicService.start(svc)
         val g = ++gen
+        selectionTiming = App.prefs.jevSelectionTiming()
         target = svc.focusedInput()
         rows = (if (ready.size > 1) ready.sortedByDescending { App.prefs.pickCount(it) } else ready).map { Row(it) }
         picking = rows.size > 1
         userPicked = false
         choosePending = false
         chooseSend = false
+        jevBusy = false
+        jevFailed = false
+        manual = false
         sel = 0
         if (picking) {
             rows.indexOfFirst { it.ch == App.prefs.lastPick }.takeIf { it >= 0 }?.let { sel = it; userPicked = true }
@@ -123,12 +139,17 @@ class Session(private val svc: VoiceService) {
         }
         releasedAt = SystemClock.elapsedRealtime()
         val g = gen
-        main.postDelayed({ if (g == gen && rows.any { it.state == State.Wait }) abort("识别超时") }, 15_000)
+        main.postDelayed({
+            if (g == gen && rows.any { it.state == State.Wait }) {
+                if (picking && rows.any { it.state == State.Final }) advancePick() else abort("识别超时")
+            }
+        }, 15_000)
+        if (picking) advancePick()
         svc.onSessionChanged()
     }
 
     private fun event(g: Int, row: Row, kind: Int, text: String) {
-        if (g != gen || row.state == State.Final || row.state == State.Error) return
+        if (g != gen || row !in rows || row.state == State.Final || row.state == State.Error) return
         when (kind) {
             Native.RECONNECT -> return svc.hud.info(text)
             Native.PARTIAL -> {
@@ -163,11 +184,128 @@ class Session(private val svc: VoiceService) {
         if (kind == Native.PARTIAL) return svc.onSessionChanged()
         if (!picking) return single(row)
         val cur = rows[sel].state
-        if (row.state == State.Final && cur != State.Final && (!userPicked || cur == State.Error)) sel = rows.indexOf(row)
+        if (row.state == State.Final) {
+            val i = rows.indexOf(row)
+            if (cur != State.Final && (!userPicked || cur == State.Error)) sel = i
+        }
+        advancePick()
+        svc.onSessionChanged()
+    }
+
+    /**
+     * 仅为有效 Jev 提前评选，避免失败或卡住的渠道拖住选择；停录后按本次录音快照的门槛推进，否则首个可用定稿开启一次配置时长的宽限。
+     * 推进时保留慢渠道文字并释放句柄；关闭或无效的 Jev 保留候选及晚到结果，等待用户选择。
+     * 显式等待上屏的选择保留原有宽限和回退逻辑，并可在录音期间沿原逻辑完成。
+     *
+     * Advance early only for valid Jev so failed or stalled channels cannot block selection. Without manual intervention,
+     * the recording's threshold snapshot advances immediately after stop; otherwise the first usable final starts one configured grace period.
+     * Slow rows retain text and release handles when advancing.
+     * Disabled or invalid Jev preserves candidates and late results for manual selection. An explicit pending choice retains
+     * its grace and fallback behavior, and may complete during recording as before.
+     */
+    private fun advancePick() {
+        if (!picking) return
+        var waiting = rows.any { it.state == State.Listen || it.state == State.Wait }
+        val finals = rows.count { it.state == State.Final }
+        val canAdvance = choosePending || canAutoPick()
+        if (!recording && waiting && canAdvance && !choosePending && finals >= selectionTiming.threshold.required(rows.size)) {
+            cancelPickGrace()
+            finishSlowRows()
+            waiting = false
+        }
+        if (recording || !waiting || !canAdvance) {
+            cancelPickGrace()
+        } else if (pickGrace == null && rows.any { it.state == State.Final }) {
+            val g = gen
+            val task = object : Runnable {
+                override fun run() {
+                    if (g != gen || !picking || recording || pickGrace !== this) return
+                    pickGrace = null
+                    if (choosePending || canAutoPick()) finishSlowRows()
+                    advancePick()
+                    svc.onSessionChanged()
+                }
+            }
+            pickGrace = task
+            main.postDelayed(task, selectionTiming.waitMs.toLong())
+        }
         if (choosePending && rows[sel].state == State.Error) rows.indexOfFirst { it.state == State.Final }.takeIf { it >= 0 }?.let { sel = it }
         if (choosePending && rows[sel].state == State.Final) return choose(sel, chooseSend)
-        if (rows.none { it.state == State.Listen || it.state == State.Wait }) choosePending = false
+        if (!waiting) choosePending = false
+        maybeJev()
+    }
+
+    private fun canAutoPick() = !manual && Native.jevCheck(App.prefs.jevConfig(selectionTiming)) == null
+
+    private fun cancelPickGrace() {
+        pickGrace?.let { main.removeCallbacks(it) }
+        pickGrace = null
+    }
+
+    private fun finishSlowRows() {
+        for (row in rows) {
+            if (row.state != State.Listen && row.state != State.Wait) continue
+            row.state = State.Error
+            val handle = row.handle
+            row.handle = 0L
+            if (handle != 0L) Native.free(handle)
+        }
+    }
+
+    /**
+     * 仅在 Jev 配置有效时自动评选；单个定稿按 pickSend 自动上屏发送或只高亮，多个定稿交给 Jev 推荐。
+     *
+     * Automatic selection requires valid Jev configuration. A single final inserts and sends or only highlights according
+     * to pickSend; multiple finals are passed to Jev for recommendation.
+     */
+    private fun maybeJev() {
+        if (!picking || recording || choosePending || manual || jevBusy || jevFailed) return
+        if (rows.any { it.state == State.Listen || it.state == State.Wait }) return
+        val cfg = App.prefs.jevConfig(selectionTiming)
+        if (Native.jevCheck(cfg) != null) return
+        val idxs = rows.indices.filter { rows[it].state == State.Final }
+        if (idxs.isEmpty()) return
+        if (idxs.size == 1) {
+            return if (App.prefs.pickSend) choose(idxs[0], true) else {
+                sel = idxs[0]
+                svc.onSessionChanged()
+            }
+        }
+        val g = gen
+        val t = ++jevToken
+        jevBusy = true
+        Native.jevPick(cfg, idxs.map { rows[it].text }.toTypedArray()) { kind, text ->
+            main.post { onJev(g, t, idxs, kind, text) }
+        }
+    }
+
+    /** 晚到（会话已换代或用户已手选）的结果一律丢弃 */
+    private fun onJev(g: Int, t: Int, idxs: List<Int>, kind: Int, text: String) {
+        if (g != gen || t != jevToken || !jevBusy) return
+        jevBusy = false
+        val i = if (kind == Native.FINAL) runCatching { idxs[JSONObject(text).getInt("index")] }.getOrNull() else null
+        if (i != null && rows.getOrNull(i)?.state == State.Final) {
+            Toast.makeText(svc, "Jev 已选 ${rows[i].ch.short}", Toast.LENGTH_SHORT).show()
+            // 关闭自动选中时只把推荐项高亮出来，不上屏、不发送，等用户自己点
+            if (!App.prefs.pickSend) {
+                sel = i
+                svc.onSessionChanged()
+                return
+            }
+            return choose(i, true)
+        }
+        jevFailed = true
+        svc.hud.error("智能选择失败，请手动选择")
         svc.onSessionChanged()
+    }
+
+    /** 用户手动选择：Jev 让位，进行中的结果作废 */
+    private fun yieldToUser() {
+        manual = true
+        if (jevBusy) {
+            jevToken++
+            jevBusy = false
+        }
     }
 
     private fun single(row: Row) {
@@ -184,6 +322,7 @@ class Session(private val svc: VoiceService) {
     /** 选一行上屏，send 时随后点发送；还在识别的行先结束录音，定稿后自动上屏 */
     fun choose(i: Int, send: Boolean = false) {
         val r = rows.getOrNull(i) ?: return
+        yieldToUser()
         sel = i
         userPicked = true
         when (r.state) {
@@ -198,7 +337,8 @@ class Session(private val svc: VoiceService) {
                 if (picking) App.prefs.countPick(r.ch)
                 val node = target
                 close()
-                if (Inject.insert(svc, node, r.text) && send) svc.send(node)
+                val ok = Inject.insert(svc, node, r.text)
+                if (ok && send) svc.send(node)
             }
             State.Error -> svc.onSessionChanged()
         }
@@ -207,6 +347,7 @@ class Session(private val svc: VoiceService) {
     /** 候选框里换到下一条可上屏的行 */
     fun next() {
         if (!picking) return
+        yieldToUser()
         val n = rows.size
         (1..n).map { (sel + it) % n }.firstOrNull { rows[it].state != State.Error }?.let {
             sel = it
@@ -231,10 +372,15 @@ class Session(private val svc: VoiceService) {
     }
 
     private fun close() {
+        cancelPickGrace()
         gen++
         recorder?.stop()
         recorder = null
-        for (r in rows) if (r.handle != 0L) Native.free(r.handle)
+        for (r in rows) {
+            val handle = r.handle
+            r.handle = 0L
+            if (handle != 0L) Native.free(handle)
+        }
         rows = emptyList()
         picking = false
         typer = null

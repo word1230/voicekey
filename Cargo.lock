@@ -4013,6 +4013,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rodio"
+version = "0.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7ceb6607dd738c99bc8cb28eff249b7cd5c8ec88b9db96c0608c1480d140fb1"
+dependencies = [
+ "cpal",
+ "hound",
+]
+
+[[package]]
 name = "rsa"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5690,7 +5700,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "voicekey"
-version = "1.7.0"
+version = "1.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5700,7 +5710,10 @@ dependencies = [
  "hex",
  "md-5",
  "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "reqwest 0.12.28",
+ "rodio",
  "serde",
  "serde_json",
  "sha2",
@@ -5718,7 +5731,7 @@ dependencies = [
 
 [[package]]
 name = "voicekey-core"
-version = "1.7.0"
+version = "1.11.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -5752,18 +5765,19 @@ dependencies = [
 
 [[package]]
 name = "voicekey-hanbao"
-version = "1.7.0"
+version = "1.11.0"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "voicekey-platform"
-version = "1.7.0"
+version = "1.11.0"
 dependencies = [
  "arboard",
  "block2",
  "core-foundation 0.10.1",
+ "coreaudio-sys",
  "evdev",
  "objc2",
  "objc2-app-kit",
@@ -5774,7 +5788,7 @@ dependencies = [
 
 [[package]]
 name = "voicekey-wtlocal"
-version = "1.7.0"
+version = "1.11.0"
 dependencies = [
  "anyhow",
  "async-trait",

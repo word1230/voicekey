@@ -13,10 +13,13 @@ mod win;
 #[cfg(windows)]
 use win as imp;
 
+mod volume;
+
 pub use imp::{
     caret, copy_selection, front_app, inject_device, inject_key, mute_output_start, paste, paste_keep,
     secure_input, start_hook, FrontApp,
 };
+pub use volume::OutputVolumeDucker;
 
 /// 浮层几何：给定工作区与浮层尺寸算落点，应用与 KWin 规则生成共用
 pub mod overlay;

@@ -7,15 +7,24 @@ import baidu from "../assets/logos/baidu.png";
 import sogou from "../assets/logos/sogou.png";
 import iflytek from "../assets/logos/iflytek.png";
 import chatterfly from "../assets/logos/chatterfly.png";
+import qwenapp from "../assets/logos/qwenapp.png";
+import bageshuo from "../assets/logos/bageshuo.png";
 
-export type Channel = "doubao" | "wetype" | "qwen" | "baidu" | "sogou" | "iflytek" | "chatterfly" | "offline" | "wetypeoffline" | "all";
+export type Channel = "doubao" | "wetype" | "qwen" | "baidu" | "sogou" | "iflytek" | "chatterfly" | "qwenapp" | "bageshuo" | "offline" | "wetypeoffline" | "all";
 export interface Shortcut { code: number; mods: number; name: string }
 export interface Combo { codes: number[]; name: string }
 export interface AiPolish { enabled: boolean; baseUrl: string; apiKey: string; model: string; prompt: string }
+export interface JevConfig {
+  mode: "off" | "official" | "yce"; key: string; endpoint: string; model: string; pool: string;
+  selectionThreshold: "half" | "twoThirds" | "all"; selectionWaitMs: number;
+}
+export interface JevTested { index: number; text: string; alias: string; ms: number; key: string }
 export interface Settings {
   channel: Channel; holdKey: string; holdCombo: Combo | null; tapShortcut: Shortcut | null; silence: number; silenceStop: boolean; streaming: boolean;
-  liveText: boolean; mic: string; muteWhileRecording: boolean; multi: Channel[]; lastPick: Channel | null; pickCounts: Partial<Record<Channel, number>>; autostart: boolean; theme: string; onboarded: boolean;
-  polishShortcut: Shortcut | null; ai: AiPolish;
+  liveText: boolean; mic: string; muteWhileRecording: boolean; multi: Channel[]; lastPick: Channel | null; pickCounts: Partial<Record<Channel, number>>;
+  soundEnabled: boolean; soundStart: string; soundProcessing: string; soundError: string;
+  autostart: boolean; theme: string; lowerSystemVolume: boolean; lowerSystemVolumePercent: number; onboarded: boolean;
+  polishShortcut: Shortcut | null; ai: AiPolish; jev: JevConfig;
 }
 export interface OfflineStatus { state: "missing" | "downloading" | "ready" | "failed"; progress?: number; error?: string }
 export interface Perms {
@@ -32,13 +41,16 @@ export interface UpdateStatus { state: "idle" | "checking" | "latest" | "availab
 export interface AppInfo {
   settings: Settings; platform: "mac" | "win" | "linux"; arch: string; version: string;
   holdKeys: { id: string; name: string }[]; channels: Channel[];
-  offline: { supported: boolean }; models: Partial<Record<Channel, OfflineStatus>>; perms: Perms; update: UpdateStatus;
+  offline: { supported: boolean }; models: Partial<Record<Channel, OfflineStatus>>; accounts: Partial<Record<Channel, boolean>>;
+  perms: Perms; update: UpdateStatus;
 }
 export type RowState = "listen" | "wait" | "final" | "error" | "skip";
 export interface Row { channel: Channel; text: string; state: RowState; ms: number | null }
-export interface Model { recording: boolean; rows: Row[]; sel: number }
+export interface Model { recording: boolean; rows: Row[]; sel: number; jev?: "idle" | "busy" | "failed" }
 
 export const call = invoke;
+export const previewSound = (id: string) => call("preview_sound", { id });
+export const listSounds = () => call<{ id: string; name: string }[]>("list_sounds");
 export const holdName = (s: Settings, keys: AppInfo["holdKeys"]) =>
   s.holdKey === "custom" ? (s.holdCombo?.name ?? "") : (keys.find((k) => k.id === s.holdKey)?.name ?? "");
 export const on = <T>(name: string, f: (p: T) => void): Promise<UnlistenFn> => listen<T>(name, (e) => f(e.payload));
@@ -51,6 +63,8 @@ export const CH: Record<Channel, { name: string; short: string; desc: string; ta
   sogou: { name: "搜狗输入法", short: "搜狗", desc: "搜狗输入法官方云端识别，中文流式出字。", tags: ["在线", "流式"], logo: sogou },
   iflytek: { name: "讯飞输入法", short: "讯飞", desc: "讯飞输入法官方云端识别，中文流式出字。", tags: ["在线", "流式"], logo: iflytek },
   chatterfly: { name: "Chatterfly", short: "Chatterfly", desc: "Chatterfly 官方云端识别，中文流式出字。", tags: ["在线", "流式"], logo: chatterfly },
+  qwenapp: { name: "千问 App", short: "千问 App", desc: "千问 App 官方云端识别，中文流式出字，需登录千问账号。", tags: ["在线", "流式", "需登录"], logo: qwenapp },
+  bageshuo: { name: "叭哥说", short: "叭哥说", desc: "网易叭哥说官方云端识别，中文流式出字，需登录有道账号。", tags: ["在线", "流式", "需登录"], logo: bageshuo },
   offline: { name: "豆包离线", short: "豆包离线", desc: "豆包输入法离线引擎，本机运行，断网可用，不上传音频。", tags: ["离线", "约 190MB"], logo: doubao },
   wetypeoffline: { name: "微信离线", short: "微信离线", desc: "微信输入法官方离线模型，本机运行，断网可用，不上传音频。", tags: ["离线", "约 100MB"], logo: wetype },
   all: { name: "多渠道", short: "多渠道", desc: "勾选的渠道同时识别、实时出字，说完在光标处挑选最满意的一条上屏。", tags: ["并行", "流式候选"], logo: "" },
@@ -58,6 +72,12 @@ export const CH: Record<Channel, { name: string; short: string; desc: string; ta
 
 /** 需要下载模型的本地渠道及下载体积 */
 export const LOCAL: Partial<Record<Channel, string>> = { offline: "约 190MB", wetypeoffline: "约 100MB" };
+
+/** 需要登录官方账号的渠道：账号名与手动粘贴时要找的 Cookie */
+export const LOGIN: Partial<Record<Channel, { account: string; cookie: string }>> = {
+  qwenapp: { account: "千问", cookie: "浏览器登录 qianwen.com 后，从开发者工具的 Cookie 里复制 tongyi_sso_ticket 的值" },
+  bageshuo: { account: "有道", cookie: "浏览器登录有道后，从开发者工具的 Cookie 里复制 DICT_PERS 的值" },
+};
 
 /** 根据平台与主题设置 html class */
 export function applyLook(platform: string, theme: string) {

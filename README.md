@@ -14,7 +14,7 @@
 
 以下为 macOS / Windows。
 
-- **多个识别渠道**：豆包、微信、千问、百度、搜狗、讯飞、Chatterfly 云端识别，以及完全本地运行的离线识别：微信离线（macOS / Windows）、豆包离线（仅 Apple 芯片 Mac）
+- **多个识别渠道**：豆包、微信、千问、百度、搜狗、讯飞、Chatterfly、千问 App、叭哥说云端识别（后两个需登录官方账号），以及完全本地运行的离线识别：微信离线（macOS / Windows）、豆包离线（仅 Apple 芯片 Mac）
 - **多渠道候选**：勾选 2 个以上渠道同时识别，光标旁弹出候选框实时显示各渠道结果，按数字键或 ↑↓ + 回车选一条上屏；默认选中上次用的渠道
 - **渠道对比**：在设置里录一段话，并排比较各渠道的结果和速度
 - **长按说话**：按住快捷键开始，松开结束
@@ -36,7 +36,7 @@
 
 iOS 17+ 的中文键盘（仅 iPhone）。默认 26 键全拼，可切九宫格；功能键和顶栏可以拖动调整。左上角麦克风说话。键盘本身不能录音，由主 App 在后台收音，再把文字送回键盘。
 
-- 云端渠道与桌面端相同，没有离线引擎
+- 云端渠道与桌面端相同（不含需登录的千问 App、叭哥说），没有离线引擎
 - 勾选多个渠道时，在键盘里对比结果再选一条上屏
 - 默认画中画待机：不占麦克风，点麦克风才录音；画中画不可用时改为常开麦
 - 操作按钮或快捷指令「VoiceKey 说话」：正在使用本键盘时开始，再按一次结束
@@ -57,12 +57,15 @@ Android 8+（arm64）。不替换当前输入法：开启无障碍服务「Voice
 
 ## 安装
 
-从 [Releases](https://github.com/J3n5en/voicekey/releases) 下载桌面端安装包。iOS 与 Android 不在 Release 里，从源码构建。
+从 [Releases](https://github.com/J3n5en/voicekey/releases) 下载桌面端安装包和 Android APK。iOS 不在 Release 里，需从源码构建。
 
 | 系统 | 文件 |
 |---|---|
 | macOS 13+（Apple 芯片与 Intel 通用） | `VoiceKey-x.y.z.dmg`，打开后拖到「应用程序」 |
 | Windows 10/11 x64 | `VoiceKey-x.y.z-x64-setup.exe` 或 `.msi` |
+| Android 8+（arm64） | `VoiceKey-x.y.z-android.apk`，首次安装需允许浏览器或文件管理器安装未知应用 |
+
+Android 装好后，在应用「关于与更新」里检查并更新：首次更新要允许 VoiceKey 安装未知应用，下载校验完成后在系统弹窗里确认安装。
 
 macOS 发布包为自签名、未经 Apple 公证，首次运行前需解除隔离：
 
@@ -90,6 +93,22 @@ xattr -dr com.apple.quarantine /Applications/VoiceKey.app
 
 单个修饰键可同时作为长按键和点按键：快速点一下为点按，按住超过 0.3 秒为长按。设为组合键的点按快捷键会被拦截，不再传给前台应用。
 
+**需登录的渠道**：千问 App 和叭哥说要登录官方账号才能用。在「识别渠道」选中渠道后点「登录」，会弹出官方网页，登录完成后窗口自动关闭。也可以手动粘贴浏览器里的登录 Cookie。
+
+- **千问 App**：用千问账号登录。
+- **叭哥说**：用有道账号登录，支持网易邮箱或手机验证码。服务端会保存录音。
+
+登录 Cookie 只保存在数据目录的 `accounts.json`（macOS 上仅当前用户可读）。退出登录会同时清除内置网页的登录状态。未登录时，多渠道识别和渠道对比会跳过这两个渠道。
+
+**多渠道选择**：Windows、当前 macOS 桌面版和 Android 遵循相同原则，避免启用 Jev 后被失败或卡住的渠道拖住评选。
+
+- **Jev 关闭或配置不可用**：保留候选，由用户手选，不自动插入定稿，也不会按提前评选规则结束慢渠道；晚到的结果仍可手选。
+- **Jev 启用且配置有效**：停录后，实际参与渠道达到所选定稿门槛即进入选择；默认三分之二，向上取整（例如三路需两路、八路需六路）。未达到门槛但已有定稿时，从停录后首条可用定稿起最多再等设定时长，默认 2.5 秒，期间全部渠道结束则立即推进。只有一条定稿时采用该条结果，多条定稿交给 Jev 评选。一直没有定稿时保留停录后 15 秒的识别超时兜底，等待规则的时限不包含 Jev 请求耗时。
+- **选择时机**：Windows、当前 macOS 桌面版和 Android 的 Jev 设置中均提供折叠选项，可选“半数 / 三分之二（推荐）/ 全部”门槛，并以 0.5 秒步长设置 0.5～5 秒的候选补齐等待时间。“全部”仍受等待上限限制，不会无限等待慢渠道。修改在下一次录音生效（桌面含续录）；恢复默认只重置这两项，不清除密钥。旧配置继续使用三分之二与 2.5 秒。
+- **用户开始手选或 Jev 评选失败**：保留人工选择权，Jev 不再代替用户选择；进行中的 Jev 结果在用户手选后失效。
+
+Android 继续遵循现有自动选中与发送设置：关闭时只高亮推荐，开启时自动上屏并发送。
+
 **离线识别**：首次选择离线渠道时下载模型，之后断网也能用。
 
 - **微信离线**：下载微信输入法官方离线语音包（约 100MB，来自腾讯 CDN），解出模型保存在数据目录的 `wtoffline/` 下；由本项目自己实现的 int8 推理运行，不依赖官方程序，macOS 和 Windows 都可用。
@@ -111,17 +130,21 @@ npx tauri build                  # Windows：nsis / msi 安装包
 - Android（需要 Android NDK 与 cargo-ndk）：先 `android/build-rust.sh`，再在 `android/` 执行 `./gradlew :app:assembleRelease`
 - Opus 由 `audiopus_sys` 从源码静态编译，相关环境变量见 `.cargo/config.toml`
 - 打包 DMG：`Scripts/dmg.sh out.dmg path/to/VoiceKey.app app/src-tauri/icons/icon.icns`
-- 命令行测试识别：`cargo run -p voicekey-core --bin vk-test -- doubao|wetype|qwen|baidu|sogou|iflytek file.wav`（WAV 需 16kHz 单声道）
+- 命令行测试识别：`cargo run -p voicekey-core --bin vk-test -- doubao|wetype|qwen|baidu|sogou|iflytek|chatterfly|qwenapp|bageshuo file.wav`（WAV 需 16kHz 单声道。qwenapp、bageshuo 的登录 Cookie 用环境变量 `VOICEKEY_QWENAPP`、`VOICEKEY_BAGESHUO` 传入）
 
 ## 发布
 
-推送 `v*` 标签后，GitHub Actions 构建 macOS 通用 DMG 与 Windows 安装包，连同应用内更新所需的更新包与 `latest.json` 一起创建 Release：
+推送 `v*` 标签后，GitHub Actions 构建 macOS 通用 DMG、Windows 安装包和 Android 签名 APK，连同应用内更新所需的更新包、`latest.json`（桌面）与 `android.json`（Android）一起创建 Release：
 
 ```bash
 git tag v1.0.1 && git push origin v1.0.1
 ```
 
 需要的 Secrets：`TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（`npx tauri signer generate` 生成的更新签名密钥）、`MACOS_CERTIFICATE` / `MACOS_CERTIFICATE_PASSWORD`（`Scripts/gen-cert.sh` 生成的自签名证书，base64 编码的 p12）。
+
+Android 另需 4 个 Secrets：`ANDROID_KEYSTORE_BASE64`（release keystore 用 `base64` 编码）、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`。tag 构建缺任何一个都会失败，不会发出 debug 签名包。签名一旦定下就不能换，换了已装用户无法覆盖升级，只能卸载重装。
+
+Android 的 versionCode 由标签推导：`vX.Y.Z` → `X×10000 + Y×100 + Z`（如 `v1.8.0` 为 10800），所以标签必须是 `vX.Y.Z` 形式，且 minor、patch 都不能超过 99，推出的值要大于现有的 6。应用内更新靠 versionCode 比较，新版必须比已装版本大。
 
 ## 结构
 
@@ -151,4 +174,4 @@ git tag v1.0.1 && git push origin v1.0.1
 
 ## 声明
 
-本项目通过分析输入法客户端协议实现，仅供学习与个人使用，与字节跳动、腾讯、阿里巴巴无关。接口可能随时变更或失效；语音会发送到对应厂商的服务器。
+本项目通过分析输入法客户端协议实现，仅供学习与个人使用，与字节跳动、腾讯、阿里巴巴、网易无关。接口可能随时变更或失效；语音会发送到对应厂商的服务器。

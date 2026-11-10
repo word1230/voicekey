@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use voicekey_core::account::Login;
 use voicekey_core::util::data_file;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -13,6 +14,8 @@ pub enum Channel {
     Sogou,
     Iflytek,
     Chatterfly,
+    QwenApp,
+    Bageshuo,
     Offline,
     WetypeOffline,
     All,
@@ -28,15 +31,26 @@ impl Channel {
             Channel::Sogou => "搜狗输入法",
             Channel::Iflytek => "讯飞输入法",
             Channel::Chatterfly => "Chatterfly",
+            Channel::QwenApp => "千问 App",
+            Channel::Bageshuo => "叭哥说",
             Channel::Offline => "豆包离线",
             Channel::WetypeOffline => "微信离线",
             Channel::All => "多渠道（说完挑选）",
         }
     }
 
+    /// 需要登录官方账号的渠道
+    pub fn login(self) -> Option<&'static Login> {
+        match self {
+            Channel::QwenApp => Some(&voicekey_core::qwenapp::LOGIN),
+            Channel::Bageshuo => Some(&voicekey_core::bageshuo::LOGIN),
+            _ => None,
+        }
+    }
+
     /// 当前平台可用的识别渠道（不含「全部」）
     pub fn engines() -> Vec<Channel> {
-        let mut v = vec![Channel::Doubao, Channel::Wetype, Channel::Qwen, Channel::Baidu, Channel::Sogou, Channel::Iflytek, Channel::Chatterfly];
+        let mut v = vec![Channel::Doubao, Channel::Wetype, Channel::Qwen, Channel::Baidu, Channel::Sogou, Channel::Iflytek, Channel::Chatterfly, Channel::QwenApp, Channel::Bageshuo];
         if crate::offline::SUPPORTED {
             v.push(Channel::Offline);
         }
@@ -77,6 +91,13 @@ pub struct Combo {
 }
 
 pub const CUSTOM_HOLD: &str = "custom";
+const LOWER_SYSTEM_VOLUME_PERCENT_MIN: u8 = 20;
+const LOWER_SYSTEM_VOLUME_PERCENT_MAX: u8 = 100;
+const LOWER_SYSTEM_VOLUME_PERCENT_STEP: u8 = 5;
+const LOWER_SYSTEM_VOLUME_PERCENT_DEFAULT: u8 = 70;
+
+/// 「无」保留字：音效逐事件的显式停用取值
+pub const NONE: &str = "none";
 
 /// AI 整理：OpenAI 兼容接口。选中文字 → 整理快捷键 → 结果覆盖原选区
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -131,9 +152,24 @@ pub struct Settings {
     pub last_pick: Option<Channel>,
     /// 候选框各渠道上屏次数，次数多的排前
     pub pick_counts: HashMap<Channel, u32>,
+    /// 音频反馈提示音总开关；默认关闭——缺省键=关，升级用户不会被突然出声
+    /// （与 lower_system_volume 默认关闭原则一致，review #4）
+    pub sound_enabled: bool,
+    /// 录音开始的提示音 id（见 crate::sound::SYSTEM_SOUNDS）
+    pub sound_start: String,
+    /// 进入识别处理的提示音 id
+    pub sound_processing: String,
+    /// 识别失败的提示音 id
+    pub sound_error: String,
     pub autostart: bool,
     pub theme: String,
+    /// 真正进入聆听后按相对比例压低系统输出；默认关闭，升级用户不会被突然改变系统声音。
+    pub lower_system_volume: bool,
+    /// 录音时相对原始系统音量降低的百分比；持久化为 settings.json 的 lowerSystemVolumePercent。
+    pub lower_system_volume_percent: u8,
     pub onboarded: bool,
+    /// 多渠道定稿后的 Jev 智能选择配置；默认关闭
+    pub jev: voicekey_core::jev::Config,
 }
 
 impl Default for Settings {
@@ -157,14 +193,21 @@ impl Default for Settings {
             live_text: true,
             mic: String::new(),
             mute_while_recording: false,
-            multi: Channel::engines().into_iter().filter(|&c| c != Channel::WetypeOffline).collect(),
+            multi: Channel::engines().into_iter().filter(|&c| c != Channel::WetypeOffline && c.login().is_none()).collect(),
             polish_shortcut: None,
             ai: AiPolish::default(),
             last_pick: None,
             pick_counts: HashMap::new(),
+            sound_enabled: false,
+            sound_start: crate::sound::DEFAULT_START.into(),
+            sound_processing: crate::sound::DEFAULT_PROCESSING.into(),
+            sound_error: crate::sound::DEFAULT_ERROR.into(),
             autostart: false,
             theme: "system".into(),
+            lower_system_volume: false,
+            lower_system_volume_percent: LOWER_SYSTEM_VOLUME_PERCENT_DEFAULT,
             onboarded: false,
+            jev: voicekey_core::jev::Config::default(),
         }
     }
 }
@@ -187,6 +230,7 @@ impl Settings {
 
     /// 不可用的渠道/按键回落默认
     pub fn sanitize(&mut self) {
+        self.jev.sanitize_selection();
         if !Channel::available().contains(&self.channel) {
             self.channel = Channel::Doubao;
         }
@@ -195,6 +239,23 @@ impl Settings {
             self.hold_key = voicekey_platform::hold_keys()[0].id.into();
         }
         self.silence = self.silence.clamp(1.0, 5.0);
+        for (id, default) in [
+            (&mut self.sound_start, crate::sound::DEFAULT_START),
+            (&mut self.sound_processing, crate::sound::DEFAULT_PROCESSING),
+            (&mut self.sound_error, crate::sound::DEFAULT_ERROR),
+        ] {
+            // 非法值或当前平台不可选（无发声路径，如非 macOS 上无兜底 WAV 的系统音）
+            // 一律回退该事件默认值，避免「选了不响」（review #3）
+            if id != NONE && !crate::sound::selectable_sounds().contains(&id.as_str()) {
+                *id = default.into();
+            }
+        }
+        let percent = self
+            .lower_system_volume_percent
+            .clamp(LOWER_SYSTEM_VOLUME_PERCENT_MIN, LOWER_SYSTEM_VOLUME_PERCENT_MAX);
+        self.lower_system_volume_percent = ((percent + LOWER_SYSTEM_VOLUME_PERCENT_STEP / 2)
+            / LOWER_SYSTEM_VOLUME_PERCENT_STEP)
+            * LOWER_SYSTEM_VOLUME_PERCENT_STEP;
         let engines = Channel::engines();
         let mut multi: Vec<Channel> = engines.iter().copied().filter(|c| self.multi.contains(c)).collect();
         if multi.len() < 2 {
@@ -214,6 +275,139 @@ impl Settings {
         match &self.hold_combo {
             Some(c) if self.hold_key == CUSTOM_HOLD => c.name.clone(),
             _ => voicekey_platform::hold_keys().iter().find(|k| k.id == self.hold_key).map_or("", |k| k.name).into(),
+        }
+    }
+
+    /// 音量 worker 使用“最终保留比例”，这里只在执行边界做一次 `1 - 降低比例` 换算。
+    pub fn retained_system_volume_fraction(&self) -> f32 {
+        1.0 - self.lower_system_volume_percent as f32 / 100.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_jev_selection_defaults_and_new_values_are_sanitized() {
+        let mut settings: Settings = serde_json::from_str(r#"{"jev":{"mode":"official","key":"test-key"}}"#).unwrap();
+        assert_eq!(settings.jev.selection_threshold, voicekey_core::jev::SelectionThreshold::TwoThirds);
+        assert_eq!(settings.jev.selection_wait_ms, 2500);
+        for (input, expected) in [(0, 500), (500, 500), (5000, 5000), (u64::MAX, 5000)] {
+            settings.jev.selection_wait_ms = input;
+            settings.sanitize();
+            assert_eq!(settings.jev.selection_wait_ms, expected);
+            assert_eq!(settings.jev.key, "test-key");
+        }
+    }
+
+    #[test]
+    fn missing_duck_percent_uses_default() {
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        value.as_object_mut().unwrap().remove("lowerSystemVolumePercent");
+        let settings: Settings = serde_json::from_value(value).unwrap();
+        assert_eq!(settings.lower_system_volume_percent, LOWER_SYSTEM_VOLUME_PERCENT_DEFAULT);
+    }
+
+    #[test]
+    fn duck_percent_is_clamped_and_snapped_to_step() {
+        let mut settings = Settings::default();
+
+        settings.lower_system_volume_percent = 1;
+        settings.sanitize();
+        assert_eq!(settings.lower_system_volume_percent, 20);
+
+        settings.lower_system_volume_percent = 33;
+        settings.sanitize();
+        assert_eq!(settings.lower_system_volume_percent, 35);
+
+        settings.lower_system_volume_percent = 99;
+        settings.sanitize();
+        assert_eq!(settings.lower_system_volume_percent, 100);
+    }
+
+    #[test]
+    fn duck_reduction_percent_maps_to_retained_fraction_once() {
+        let mut settings = Settings::default();
+        assert!((settings.retained_system_volume_fraction() - 0.3).abs() < f32::EPSILON);
+
+        settings.lower_system_volume_percent = 100;
+        assert!(settings.retained_system_volume_fraction().abs() < f32::EPSILON);
+
+        settings.lower_system_volume_percent = 20;
+        assert!((settings.retained_system_volume_fraction() - 0.8).abs() < f32::EPSILON);
+    }
+}
+
+#[cfg(test)]
+mod sound_settings_tests {
+    use super::*;
+
+    /// 旧版配置文件没有提示音字段：反序列化后应得到默认值，不报错
+    #[test]
+    fn legacy_config_without_sound_fields_falls_back_to_defaults() {
+        let s: Settings = serde_json::from_str(r#"{"channel":"doubao","mic":""}"#).unwrap();
+        assert!(!s.sound_enabled, "缺省键=关：升级用户不被突然出声（review #4）");
+        assert!(crate::sound::is_known(&s.sound_start), "默认开始音效必须在音效池中");
+        assert!(crate::sound::is_known(&s.sound_processing));
+        assert!(crate::sound::is_known(&s.sound_error));
+    }
+
+    /// 配置里出现未知/已下架音效 id：sanitize 应回退为该事件默认值
+    #[test]
+    fn sanitize_reverts_unknown_sound_ids_to_defaults() {
+        let mut s = Settings::default();
+        let (start, processing, error) =
+            (s.sound_start.clone(), s.sound_processing.clone(), s.sound_error.clone());
+        s.sound_start = "nope".into();
+        s.sound_processing = "".into();
+        s.sanitize();
+        assert_eq!(s.sound_start, start);
+        assert_eq!(s.sound_processing, processing);
+        // 合法 id 原样保留
+        s.sound_error = error.clone();
+        s.sanitize();
+        assert_eq!(s.sound_error, error);
+    }
+
+    /// 非 macOS：无同名兜底 WAV 的系统音不可发声，sanitize 回退该事件默认值（review #3）
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn sanitize_reverts_platform_unavailable_sound_ids() {
+        let mut s = Settings::default();
+        s.sound_start = "Hero".into();
+        s.sound_error = "Frog".into();
+        s.sanitize();
+        assert_eq!(s.sound_start, crate::sound::DEFAULT_START, "无兜底音回退默认");
+        assert_eq!(s.sound_error, crate::sound::DEFAULT_ERROR, "无兜底音回退默认");
+    }
+
+    /// macOS：系统铃声全量可选，合法选择不被 sanitize 回退
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sanitize_keeps_platform_available_sound_ids() {
+        let mut s = Settings::default();
+        s.sound_start = "Glass".into();
+        s.sound_error = "Frog".into();
+        s.sanitize();
+        assert_eq!(s.sound_start, "Glass", "macOS 上系统音都可选");
+        assert_eq!(s.sound_error, "Frog");
+    }
+
+    /// 「无」是显式合法取值：sanitize 不得把它回退成默认音效
+    #[test]
+    fn sanitize_keeps_none_sound_ids() {
+        let mut s = Settings::default();
+        for id in [&mut s.sound_start, &mut s.sound_processing, &mut s.sound_error] {
+            *id = NONE.into();
+        }
+        s.sanitize();
+        for (field, id) in [
+            ("sound_start", s.sound_start.as_str()),
+            ("sound_processing", s.sound_processing.as_str()),
+            ("sound_error", s.sound_error.as_str()),
+        ] {
+            assert_eq!(id, NONE, "{field} 的「无」选择不得被 sanitize 回退");
         }
     }
 }

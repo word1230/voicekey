@@ -72,8 +72,8 @@ class Bubble(private val svc: VoiceService) : View(svc) {
     private fun place() {
         val m = resources.displayMetrics
         val p = App.prefs
-        lp.x = if (p.bubbleX >= 0) p.bubbleX.coerceIn(0, m.widthPixels - size) else m.widthPixels - size - (8 * dp).toInt()
-        lp.y = if (p.bubbleY >= 0) p.bubbleY.coerceIn(0, m.heightPixels - size) else (m.heightPixels * 0.4f).toInt()
+        lp.x = if (p.bubbleX != Prefs.UNSET) p.bubbleX.coerceIn(0, m.widthPixels - size) else m.widthPixels - size - (8 * dp).toInt()
+        lp.y = if (p.bubbleY != Prefs.UNSET) p.bubbleY.coerceIn(0, m.heightPixels - size) else (m.heightPixels * 0.4f).toInt()
     }
 
     override fun onDraw(c: Canvas) {
@@ -118,6 +118,11 @@ class Bubble(private val svc: VoiceService) : View(svc) {
                 when {
                     held -> svc.session.holdEnd()
                     dragging -> {
+                        // 拖到屏幕边缘外时坐标为负，先夹回屏内再存，否则下次显示会被当成未设置
+                        val m = resources.displayMetrics
+                        lp.x = lp.x.coerceIn(0, m.widthPixels - size)
+                        lp.y = lp.y.coerceIn(0, m.heightPixels - size)
+                        wm.updateViewLayout(this, lp)
                         App.prefs.bubbleX = lp.x
                         App.prefs.bubbleY = lp.y
                     }
