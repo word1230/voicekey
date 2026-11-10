@@ -44,8 +44,10 @@ git rev-list --left-right --count HEAD...upstream/main
 git diff --name-only "$BASE"..upstream/main
 ```
 
-重点看上游有没有碰 `crates/platform/`。截至 v1.7.0 **没碰过**，所以 Linux 平台层原样保留；
-如果哪天碰了，按 `CLAUDE.md` 的约定以 `mac.rs` 为准把三平台接口对齐。
+重点看上游有没有碰 `crates/platform/`。截至 v1.11.0 仍**没碰过**（只加了 `volume.rs`，
+靠 `crate::imp::output_volume_*` 回调各平台），所以 Linux 平台层主体原样保留——但要在
+`linux.rs` 补三个 `output_volume_*` 空桩（返回 `None`），否则上游的 ducking 线程在 Linux
+编译不过；如果哪天碰了，按 `CLAUDE.md` 的约定以 `mac.rs` 为准把三平台接口对齐。
 
 ## 2. 试合并（不动工作区）
 
@@ -53,20 +55,26 @@ git diff --name-only "$BASE"..upstream/main
 git merge-tree --write-tree --name-only --no-messages HEAD upstream/main
 ```
 
-退出码 1 + 文件名列表就是会冲突的文件。v1.7.0 那次的预期是：
+退出码 1 + 文件名列表就是会冲突的文件。v1.11.0 那次（fork 基线 v1.7.0，上游 +41 提交）是
+8 个文件，预期与解法：
 
 | 文件 | 解法 |
 |---|---|
 | `Cargo.lock` | `git checkout --theirs Cargo.lock`，再 `cargo check --workspace --all-targets` 把 fork 的 evdev/uinput 依赖补回来 |
-| `app/src-tauri/src/ui.rs` | 保留 fork 的 `Area::units` / `set_pos(physical)` 重构，叠加上游的 `cap_len` / `clamp_axis` / `logical_h` 防 panic 修复 |
-| `app/src/pages/Onboard.svelte` | 保留 fork 的 `injectBlocked` 告警分支，内层文案用上游的 `silenceStop` |
-| `app/src/lib/api.ts` | 两边的 `Settings` 字段都保留（`muteWhileRecording` 与 `holdCombo` / `silenceStop` / `pickCounts`） |
+| `app/src-tauri/Cargo.toml` | fork 的 `[target.linux] gtk` 与上游的 `objc2-app-kit`/`objc2-foundation` 都保留 |
+| `app/src-tauri/src/controller.rs` | fork 的 `mute_output`/`set_tray_active`/`record_started`/`insert` 预检 与上游的 `chime_gen` 门闩/`play_after_restore`/Jev 评选 语义交织，逐处合并 |
+| `app/src-tauri/src/settings.rs` | fork 字段（`mute_while_recording`/`polish_shortcut`/`ai`）与上游字段（`sound_*`/`lower_system_volume*`/`jev`）都留；`multi` 默认过滤用上游版（`login().is_none()`） |
+| `app/src-tauri/src/ui.rs` | 保留 fork 的 `TRAY_ACTIVE`/`set_tray_active`（上游 v1.10 删了录音态高亮，决策是保留）；`create_overlays` 里的 pick 创建删掉，交给上游的 `sync_pick` 按需创建/销毁 |
+| `app/src/lib/api.ts` | 两边 `Settings` 字段并集：fork 的 `muteWhileRecording`/`polishShortcut`/`ai` + 上游的 `sound*`/`lowerSystemVolume*`/`jev` |
+| `crates/platform/src/lib.rs` | fork 主体（`inject`/`overlay`/`kwin`/`OutputMute`）+ 追加上游的 `mod volume`/`OutputVolumeDucker` |
+| `crates/platform/src/mac.rs` | 注释二选一，取上游的（多了 autorelease pool 说明） |
 
-`main.rs`、`settings.rs`、`controller.rs` 通常能自动合并，但要读一遍语义，上游改过：
+v1.7.0 那次的历史预期（遗留参考）：`ui.rs` 保 fork 的 `Area::units`/`set_pos(physical)`、
+`Onboard.svelte` 保 fork 的 `injectBlocked` 分支。
 
-- `hold_code()` → `hold_codes()` + `c.set_hold(...)`（自定义长按组合）
-- `Settings` 新增 `hold_combo` / `silence_stop` / `pick_counts`，`Channel` 新增 `Chatterfly`
-- `Segments::partial` 返回 `Option<bool>`，识别文字变化也算“在说话”
+`main.rs` 自动合并，但读一遍：上游加了 `mod sound`/`mod login`、`ui::sync_pick` 调用
+（pick 面板按 `s.channel == Channel::All` 按需创建），fork 的 `mod polish`/`inject_problem`
+预检都还在。
 
 ## 3. 合并
 
